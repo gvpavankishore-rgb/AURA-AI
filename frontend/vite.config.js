@@ -7,11 +7,11 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://localhost:5001',
+        target: 'https://aura-ai-backend-tpe2.onrender.com',
         changeOrigin: true,
       },
       '/uploads': {
-        target: 'http://localhost:5001',
+        target: 'https://aura-ai-backend-tpe2.onrender.com',
         changeOrigin: true,
       },
     },
