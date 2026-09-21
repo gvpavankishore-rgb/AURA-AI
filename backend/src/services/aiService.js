@@ -2,6 +2,7 @@ import env from '../config/env.js';
 import fs from 'fs';
 import path from 'path';
 import * as openRouter from './providers/openRouterProvider.js';
+import * as openAi from './providers/openAiProvider.js';
 import { getDeveloperContextPrompt } from './developerInfo.js';
 import { isCodingRequest, isVisionHint } from './intentDetector.js';
 
@@ -220,11 +221,12 @@ export const processMessage = async ({ messages, memories = [], mode = 'chat', a
 };
 
 export const generateImage = async (prompt, size = '1024x1024') => {
-  if (!env.hasAiKey) throw new Error(openRouter.AI_KEY_MISSING_MESSAGE);
   try {
-    return await openRouter.createImage({ model: env.aiImageModel, prompt, size });
+    // Real image generation via the OpenAI Images API using OPENAI_API_KEY
+    // from backend/.env only. The key never leaves the server.
+    return await openAi.createImage({ model: env.openAiImageModel, prompt, size });
   } catch (err) {
-    const friendly = openRouter.SAFE_ERRORS.has(err.message) ? err.message : openRouter.USER_ERROR_UNAVAILABLE;
+    const friendly = openAi.SAFE_ERRORS.has(err.message) ? err.message : openAi.USER_ERROR_UNAVAILABLE;
     const rethrown = new Error(friendly);
     rethrown.statusCode = err.statusCode || 502;
     throw rethrown;

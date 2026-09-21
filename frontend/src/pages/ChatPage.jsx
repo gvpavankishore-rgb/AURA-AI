@@ -405,11 +405,12 @@ export default function ChatPage() {
         window.dispatchEvent(new CustomEvent('aura:history-updated'));
         return { ok: true };
       }
+      const mediaType = data.mediaType || 'image/png';
       const assistantMsg = {
         _id: 'gen-ai-' + genId,
         role: 'assistant',
         content: data.revisedPrompt || trimmed,
-        attachments: [{ type: 'image', filename: '', preview: `data:image/png;base64,${image}`, generated: true }],
+        attachments: [{ type: 'image', filename: '', preview: `data:${mediaType};base64,${image}`, generated: true }],
         createdAt: new Date().toISOString(),
       };
       setMessages(prev => [...prev, assistantMsg]);

@@ -74,6 +74,18 @@ if (!hasExplicitVisionModel) {
   console.warn('  [AURA] Set AI_VISION_MODEL in backend/.env if you use a different vision-capable model.');
 }
 
+// Image generation uses the dedicated OpenAI Images API, authenticated with
+// OPENAI_API_KEY from backend/.env only (never exposed to the frontend).
+const openAiApiKey = process.env.OPENAI_API_KEY || '';
+if (!openAiApiKey) {
+  console.warn('\n  ##############################################################');
+  console.warn('  ##  OPENAI_API_KEY is missing.                              ##');
+  console.warn('  ##  Text-to-image generation will be unavailable until a    ##');
+  console.warn('  ##  valid OpenAI API key is set in backend/.env.            ##');
+  console.warn('  ##  Get one at: https://platform.openai.com/api-keys        ##');
+  console.warn('  ##############################################################\n');
+}
+
 export default {
   port: process.env.PORT || 5001,
   nodeEnv: process.env.NODE_ENV || 'development',
@@ -91,7 +103,8 @@ export default {
   openRouterAppName: process.env.OPENROUTER_APP_NAME || 'AURA AI',
   aiModel,
   aiVisionModel: process.env.AI_VISION_MODEL || DEFAULT_VISION_MODEL,
-  aiImageModel: process.env.AI_IMAGE_MODEL || (isOpenRouter ? 'openai/gpt-image-1' : 'dall-e-3'),
+  openAiApiKey,
+  openAiImageModel: process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1',
   aiTranscribeModel: process.env.AI_TRANSCRIBE_MODEL || (isOpenRouter ? 'openai/whisper-large-v3' : 'whisper-1'),
   aiTtsModel: process.env.AI_TTS_MODEL || (isOpenRouter ? 'openai/gpt-4o-mini-tts-2025-12-15' : 'tts-1'),
 };

@@ -41,6 +41,7 @@ export const generate = async (req, res, next) => {
     const { prompt, size, conversationId } = body;
     if (!prompt || !String(prompt).trim()) throw new AppError('Prompt is required', 400);
     const result = await generateImage(String(prompt), size || '1024x1024');
+    console.log(`[Images] generate "${String(prompt).slice(0, 60)}" -> ${result.mediaType}, ${Math.round((result.image.length * 3) / 4 / 1024)} KB image returned (OpenAI API).`);
     let chatId = null;
     if (req.user) {
       ensureAiDir();
@@ -62,8 +63,9 @@ export const generate = async (req, res, next) => {
         },
       });
       chatId = chat._id;
+      console.log(`[Images] Persisted generated image to uploads/ai/${name} (chat ${String(chatId)})`);
     }
-    success(res, { image: result.image, revisedPrompt: result.revisedPrompt, chatId });
+    success(res, { image: result.image, mediaType: result.mediaType, revisedPrompt: result.revisedPrompt, chatId });
   } catch (err) {
     next(err);
   }
