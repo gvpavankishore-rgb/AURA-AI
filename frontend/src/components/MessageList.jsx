@@ -8,13 +8,13 @@ import ChatAvatar from './ChatAvatar';
 import ActionPermissionCard from './ActionPermissionCard';
 import DeveloperProfileCard from './DeveloperProfileCard';
 import { useAuth } from '../context/AuthContext';
-import api from '../services/api';
+import api, { uploadUrl } from '../services/api';
 import useAutoScroll from '../hooks/useAutoScroll';
 import SmartImage from './SmartImage';
 
 const messageUrl = (att) => {
   if (att.preview) return att.preview;
-  if (att.path) return '/uploads/' + att.path.split(/[\\/]/).pop();
+  if (att.path) return uploadUrl(att.path);
   return '';
 };
 
@@ -111,12 +111,22 @@ const isImageAttachment = (a) =>
   /^image\//.test(a.type || '') ||
   (a.mimetype && a.mimetype.startsWith('image/'));
 
+const sourcesForMessage = (msg) => {
+  if (msg.role !== 'assistant') return [];
+  if (Array.isArray(msg.sources)) return msg.sources;
+  const meta = msg.metadata || {};
+  if (Array.isArray(meta.sources)) return meta.sources;
+  if (Array.isArray(meta.webSearch?.sources)) return meta.webSearch.sources;
+  return [];
+};
+
 const revealedContentIds = new Set();
 
 function MessageBody({ msg, isLast, streaming }) {
   const attachmentsArr = Array.isArray(msg.attachments) ? msg.attachments : [];
   const images = attachmentsArr.filter(a => isImageAttachment(a) && messageUrl(a));
   const others = attachmentsArr.filter(a => !isImageAttachment(a));
+  const sources = sourcesForMessage(msg);
   const revealContent = !!(
     msg.role === 'assistant' &&
     msg.content &&
@@ -168,6 +178,22 @@ function MessageBody({ msg, isLast, streaming }) {
         </div>
       )}
       <MarkdownContent content={msg.content} />
+      {sources.length > 0 && (
+        <div className="sources-section">
+          <div className="sources-title">Sources</div>
+          <ul className="sources-list">
+            {sources.map((s, i) => (
+              <li key={i}>
+                {s && s.url ? (
+                  <a href={s.url} target="_blank" rel="noopener noreferrer">{s.title || s.url}</a>
+                ) : (
+                  <span>{s?.title || s?.url || 'Source'}</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {msg.role === 'assistant' && (msg.developerProfile || msg.metadata?.developerProfile) && (
         <DeveloperProfileCard />
       )}
@@ -297,6 +323,8 @@ function estimateRowHeight(msg) {
   const atts = Array.isArray(msg.attachments) ? msg.attachments : [];
   if (atts.some(isImageAttachment)) h += 180;
   if (atts.some(a => !isImageAttachment(a))) h += 30;
+  const sources = sourcesForMessage(msg);
+  if (sources.length > 0) h += 28 + sources.length * 22;
   if (msg.developerProfile || msg.metadata?.developerProfile) h += 90;
   return Math.min(1600, Math.max(64, h));
 }

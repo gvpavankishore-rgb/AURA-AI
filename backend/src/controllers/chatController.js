@@ -9,12 +9,73 @@ import { extractTextFromFile } from '../services/documentText.js';
 import { detectAction, buildUnsupportedMessage } from '../services/actionDetector.js';
 import { isDeveloperQuery } from '../services/developerInfo.js';
 import { isCodingRequest } from '../services/intentDetector.js';
+import * as webSearchService from '../services/webSearchService.js';
+import { detectWebSearchIntent } from '../services/webSearchDetector.js';
+import * as weatherService from '../services/weatherService.js';
 
 const MAX_DOC_CONTEXT = 24000;
 const CHAT_PAGE_DEFAULT_LIMIT = 50;
 const CHAT_PAGE_MAX_LIMIT = 100;
 
 const CHAT_MODES = ['chat', 'coding', 'voice', 'documents', 'translate'];
+
+const ASK_LOCATION_MESSAGE = 'Which city or location should I check the weather for?';
+const ASK_LOCATION_FULL = `${ASK_LOCATION_MESSAGE} For example: "weather in Hyderabad" or "what is the temperature in London today?"`;
+
+// Web-search / live-data pipeline stage helper:
+//  - "none"   -> normal OpenRouter flow (no live info requested)
+//  - "static" -> answer without the AI (real weather, weather location prompt,
+//                search temporarily unavailable or returned no results)
+//  - "search" -> perform the web search, attach sources + context for the AI
+const runWebSearchStage = async (content) => {
+  const intent = detectWebSearchIntent(content || '');
+  if (!intent.needsSearch) return { type: 'none' };
+
+  // Dedicated real-time weather: bypasses OpenRouter entirely and returns a
+  // clean AURA-style weather block. Falls back to web search only when the
+  // weather service is not configured.
+  if (intent.weather) {
+    if (!intent.location) {
+      return { type: 'static', content: ASK_LOCATION_FULL };
+    }
+    const weatherResult = await weatherService.tryGetWeather(intent.location);
+    if (weatherResult.type === 'ok') {
+      return { type: 'static', content: weatherResult.message, metadata: weatherResult.metadata };
+    }
+    if (weatherResult.type === 'error') {
+      return { type: 'static', content: weatherResult.message, metadata: { weather: { used: true, error: true } } };
+    }
+    console.warn('[Weather] WEATHER_API_KEY missing — falling back to web search for weather query.');
+  }
+
+  try {
+    const result = await webSearchService.searchWeb(content || '');
+    if (!result.enabled) {
+      console.warn('[WebSearch] WEB_SEARCH_ENABLED is not true; skipping live web search for this message.');
+      return { type: 'none' };
+    }
+    if (result.results.length === 0) {
+      return {
+        type: 'static',
+        content: webSearchService.SEARCH_NO_RESULTS_MESSAGE,
+        metadata: { webSearch: { used: true, sources: [] } },
+      };
+    }
+    return {
+      type: 'search',
+      sources: result.results,
+      contextText: webSearchService.buildSearchContext(result.results),
+      metadata: { webSearch: { used: true, sources: result.results } },
+    };
+  } catch (err) {
+    console.error('[WebSearch] Failed:', err?.message || err);
+    return {
+      type: 'static',
+      content: webSearchService.SEARCH_UNAVAILABLE_MESSAGE,
+      metadata: { webSearch: { used: true, sources: [] } },
+    };
+  }
+};
 
 const buildDocuments = (messages) => {
   const docs = [];
@@ -249,6 +310,21 @@ export const sendMessage = async (req, res, next) => {
       return success(res, { chat, userMessage, action: actionRequest });
     }
 
+    const webStage = await runWebSearchStage(content || '');
+
+    if (webStage.type === 'static') {
+      const assistantMessage = await Message.create({
+        conversation: chat._id,
+        role: 'assistant',
+        content: webStage.content,
+        metadata: webStage.metadata || {},
+      });
+      await setTitleIfDefault(chat, content, hydratedAttachments);
+      chat.updatedAt = new Date();
+      await chat.save();
+      return success(res, { chat, userMessage, assistantMessage });
+    }
+
     const aiResponse = await processMessage({
       messages: history.map(m => ({ role: m.role, content: m.content })),
       memories: memories.map(m => m.content),
@@ -256,6 +332,9 @@ export const sendMessage = async (req, res, next) => {
       attachments: hydratedAttachments,
       userContent: content,
       documents,
+      webSearch: webStage.type === 'search'
+        ? { sources: webStage.sources, text: webStage.contextText }
+        : null,
     });
 
     const assistantMessage = await Message.create({
@@ -264,6 +343,7 @@ export const sendMessage = async (req, res, next) => {
       content: aiResponse.content,
       metadata: {
         ...(aiResponse.metadata || {}),
+        ...(webStage.type === 'search' ? webStage.metadata : {}),
         ...(isDeveloperQuery(content || '') ? { developerProfile: true } : {}),
       },
     });
@@ -389,6 +469,32 @@ export const streamMessage = async (req, res, next) => {
       return;
     }
 
+    const webStage = await runWebSearchStage(triggerContent || '');
+
+    if (webStage.type === 'static') {
+      res.write(`data: ${JSON.stringify({ content: webStage.content })}\n\n`);
+      try {
+        await Message.create({
+          conversation: chat._id,
+          role: 'assistant',
+          content: webStage.content,
+          metadata: webStage.metadata || {},
+        });
+        await setTitleIfDefault(chat, triggerContent, triggerAttachments);
+        chat.updatedAt = new Date();
+        await chat.save();
+      } catch (err) {
+        console.error('[Stream] Failed to persist web-search response:', err.message || err);
+      }
+      res.write(`data: [DONE]\n\n`);
+      res.end();
+      return;
+    }
+
+    if (webStage.type === 'search') {
+      res.write(`data: ${JSON.stringify({ type: 'sources', sources: webStage.sources })}\n\n`);
+    }
+
     let fullContent = '';
 
     try {
@@ -400,6 +506,9 @@ export const streamMessage = async (req, res, next) => {
         userContent: triggerContent,
         documents,
         stream: true,
+        webSearch: webStage.type === 'search'
+          ? { sources: webStage.sources, text: webStage.contextText }
+          : null,
       });
 
       for await (const chunk of stream) {
@@ -420,7 +529,10 @@ export const streamMessage = async (req, res, next) => {
           conversation: chat._id,
           role: 'assistant',
           content: fullContent,
-          metadata: developerQuery ? { developerProfile: true } : {},
+          metadata: {
+            ...(developerQuery ? { developerProfile: true } : {}),
+            ...(webStage.type === 'search' ? webStage.metadata : {}),
+          },
         });
       }
       await setTitleIfDefault(chat, triggerContent, triggerAttachments);

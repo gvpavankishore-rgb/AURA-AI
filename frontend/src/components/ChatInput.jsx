@@ -56,9 +56,7 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
   const [dragActive, setDragActive] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [cameraOpen, setCameraOpen] = useState(false);
-  const [imageGenOpen, setImageGenOpen] = useState(false);
-  const [imageGenPrompt, setImageGenPrompt] = useState('');
-  const [imageGenBusy, setImageGenBusy] = useState(false);
+  const [imageGenerationMode, setImageGenerationMode] = useState(false);
   const [codingMode, setCodingMode] = useState(false);
   const textareaRef = useRef(null);
   const dragDepth = useRef(0);
@@ -79,9 +77,7 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
       mediaRecorder.current = null;
       streamRef.current = null;
       setCameraOpen(false);
-      setImageGenOpen(false);
-      setImageGenPrompt('');
-      setImageGenBusy(false);
+      setImageGenerationMode(false);
       setRecording(false);
       textareaRef.current?.focus();
     },
@@ -151,6 +147,29 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
   const handleSend = async () => {
     if (loading || transcribing || submitting || busyAttachments) return;
     const trimmed = text.trim();
+
+    // Image generation mode reuses the SAME composer + Send button. The typed
+    // prompt goes straight to the image generator; on success the input is
+    // cleared and mode is exited (matching the existing UX), on failure the
+    // prompt is kept so the user can retry.
+    if (imageGenerationMode) {
+      if (!trimmed) return;
+      setSubmitting(true);
+      if (typeof onGenerateImage === 'function') {
+        const result = await onGenerateImage(trimmed);
+        if (result && result.ok) {
+          setText('');
+          setAttachments([]);
+          releaseAllPreviewUrls();
+          setMenuOpen(false);
+          setImageGenerationMode(false);
+        }
+      }
+      setSubmitting(false);
+      textareaRef.current?.focus();
+      return;
+    }
+
     if (!trimmed && attachments.length === 0) return;
     let content = trimmed;
     if (translateMode && trimmed) {
@@ -371,24 +390,6 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
     textareaRef.current?.focus();
   };
 
-  const handleImageGenSend = async () => {
-    if (imageGenBusy || !imageGenPrompt.trim()) return;
-    setImageGenBusy(true);
-    try {
-      if (typeof onGenerateImage === 'function') {
-        const result = await onGenerateImage(imageGenPrompt.trim());
-        if (result && result.ok) {
-          setImageGenPrompt('');
-          setImageGenOpen(false);
-        }
-      }
-    } catch {
-      /* handled by ChatPage */
-    } finally {
-      setImageGenBusy(false);
-    }
-  };
-
   const toggleMic = () => {
     if (loading || transcribing || submitting) return;
     if (recording) {
@@ -423,7 +424,9 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
         ? 'Ask for code, debugging, or explanation...'
         : translateMode
           ? `Type text to translate to ${translateTargets.find(l => l.code === targetLanguage)?.name || 'Spanish'}...`
-          : attachments.length > 0
+          : imageGenerationMode
+            ? 'Describe the image you want to create...'
+            : attachments.length > 0
             ? 'Ask about this...'
             : (placeholder || 'Ask AURA anything...');
 
@@ -471,27 +474,12 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
           </div>
         )}
 
-        {imageGenOpen && (
-          <div className="composer-imagegen">
-            <Wand2 size={14} className="composer-tool-icon" />
-            <input
-              className="imagegen-input"
-              value={imageGenPrompt}
-              onChange={e => setImageGenPrompt(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') handleImageGenSend(); }}
-              placeholder="Describe the image to create (e.g. a futuristic city)..."
-              aria-label="Image generation prompt"
-              autoFocus
-            />
-            <button
-              className="btn btn-primary btn-sm"
-              onClick={handleImageGenSend}
-              disabled={imageGenBusy || !imageGenPrompt.trim()}
-            >
-              {imageGenBusy ? <span className="mini-spinner" /> : <Wand2 size={13} />} Generate
-            </button>
-            <button className="remove-btn" onClick={() => { setImageGenOpen(false); setImageGenPrompt(''); }} aria-label="Close image generation" title="Close">
-              <X size={13} />
+        {imageGenerationMode && (
+          <div className="composer-mode">
+            <Wand2 size={13} />
+            Image generation
+            <button className="remove-btn" onClick={() => setImageGenerationMode(false)} aria-label="Disable image generation" title="Disable image generation">
+              <X size={12} />
             </button>
           </div>
         )}
@@ -605,8 +593,8 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
                 <button role="menuitem" onClick={() => { setTranslateMode(o => !o); setMenuOpen(false); }}>
                   <Languages size={16} /> {translateMode ? 'Close translation' : 'Translate'}
                 </button>
-                <button role="menuitem" onClick={() => { setMenuOpen(false); setImageGenOpen(o => { const next = !o; if (!next) setImageGenPrompt(''); return next; }); }}>
-                  <Wand2 size={16} /> Create image
+                <button role="menuitem" onClick={() => { setImageGenerationMode(o => !o); setMenuOpen(false); }}>
+                  <Wand2 size={16} /> {imageGenerationMode ? 'Exit image generation' : 'Create image'}
                 </button>
                 <button role="menuitem" onClick={() => { setCodingMode(o => !o); setMenuOpen(false); }}>
                   <Braces size={16} /> {codingMode ? 'Exit coding mode' : 'Coding mode'}

@@ -39,12 +39,21 @@ const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 const aiProvider = (process.env.AI_PROVIDER || 'openrouter').toLowerCase();
 const isOpenRouter = aiProvider === 'openrouter';
 
-// OpenRouter key is the primary AI key. Legacy provider-agnostic
-// AI_API_KEY / OPENAI_API_KEY are kept ONLY for backward compatibility so
-// existing deployments keep working after the migration.
+// OpenRouter two-key failover. OPENROUTER_API_KEY_1 is the primary key and
+// OPENROUTER_API_KEY_2 is the backup; if a request fails with key 1 the same
+// request is retried with key 2. The legacy single OPENROUTER_API_KEY (and
+// AI_API_KEY / OPENAI_API_KEY) are kept for backward compatibility so existing
+// deployments keep working after the migration.
 const legacyAiKey = process.env.AI_API_KEY || process.env.OPENAI_API_KEY || '';
-const openRouterApiKey = process.env.OPENROUTER_API_KEY || legacyAiKey;
-const hasAiKey = Boolean(openRouterApiKey);
+const openRouterApiKey1 = process.env.OPENROUTER_API_KEY_1 || process.env.OPENROUTER_API_KEY || legacyAiKey;
+const openRouterApiKey2 = process.env.OPENROUTER_API_KEY_2 || '';
+const openRouterKeys = openRouterApiKey2
+  ? [openRouterApiKey1, openRouterApiKey2]
+  : openRouterApiKey1
+    ? [openRouterApiKey1]
+    : [];
+const openRouterApiKey = openRouterApiKey1;
+const hasAiKey = openRouterKeys.length > 0;
 if (!hasAiKey) {
   console.warn('\n  ##############################################################');
   console.warn('  ##  OPENROUTER_API_KEY is missing.                          ##');
@@ -74,22 +83,40 @@ if (!hasExplicitVisionModel) {
   console.warn('  [AURA] Set AI_VISION_MODEL in backend/.env if you use a different vision-capable model.');
 }
 
-// Image generation uses the dedicated OpenAI Images API, authenticated with
-// OPENAI_API_KEY from backend/.env only (never exposed to the frontend).
+// Image generation uses OpenRouter's dedicated images endpoint (POST /images)
+// with OPENROUTER_IMAGE_MODEL and the same OPENROUTER_API_KEY_1 /
+// OPENROUTER_API_KEY_2 two-account failover used by chat. The direct OpenAI
+// Images API is never used, so image generation does NOT depend on
+// OPENAI_API_KEY or OpenAI billing. OPENAI_API_KEY (when present) is only
+// used for optional direct-OpenAI voice features (whisper / tts).
 const openAiApiKey = process.env.OPENAI_API_KEY || '';
 if (!openAiApiKey) {
   console.warn('\n  ##############################################################');
-  console.warn('  ##  OPENAI_API_KEY is missing.                              ##');
-  console.warn('  ##  Text-to-image generation will be unavailable until a    ##');
-  console.warn('  ##  valid OpenAI API key is set in backend/.env.            ##');
-  console.warn('  ##  Get one at: https://platform.openai.com/api-keys        ##');
+  console.warn('  ##  OPENAI_API_KEY is optional.                            ##');
+  console.warn('  ##  Image generation always uses OpenRouter (OPENROUTER_   ##');
+  console.warn('  ##  IMAGE_MODEL + OPENROUTER_API_KEY_1 / _2). OPENAI_API_  ##');
+  console.warn('  ##  KEY is only needed for direct-OpenAI voice features    ##');
+  console.warn('  ##  (whisper / tts); without it those fall back to         ##');
+  console.warn('  ##  OpenRouter / ElevenLabs.                               ##');
   console.warn('  ##############################################################\n');
 }
+
+// Optional ElevenLabs text-to-speech (ELEVENLABS_API_KEY). When set, TTS uses
+// ElevenLabs first; otherwise OpenAI TTS and then OpenRouter are tried.
+const elevenLabsApiKey = process.env.ELEVENLABS_API_KEY || '';
+
+// Allowed CORS origins. CLIENT_URL may hold a comma-separated allow-list so a
+// single deployed backend can serve both the local dev origin
+// (http://localhost:5173) and the production frontend (the Render static site
+// origin). Defaults to the local dev origin so nothing breaks out of the box.
+const clientUrlRaw = process.env.CLIENT_URL || 'http://localhost:5173';
+const clientOrigins = clientUrlRaw.split(',').map(s => s.trim()).filter(Boolean);
 
 export default {
   port: process.env.PORT || 5001,
   nodeEnv: process.env.NODE_ENV || 'development',
-  clientUrl: process.env.CLIENT_URL || 'http://localhost:5173',
+  clientUrl: clientUrlRaw,
+  clientOrigins,
   supabaseUrl: normalizeSupabaseUrl(process.env.SUPABASE_URL),
   supabaseAnonKey: process.env.SUPABASE_ANON_KEY || '',
   hasSupabase,
@@ -98,27 +125,47 @@ export default {
   aiApiKey: openRouterApiKey,
   hasAiKey,
   openRouterApiKey,
+  openRouterApiKey1,
+  openRouterApiKey2,
+  openRouterKeys,
   openRouterBaseUrl,
   openRouterSiteUrl: process.env.OPENROUTER_SITE_URL || process.env.CLIENT_URL || 'http://localhost:5173',
   openRouterAppName: process.env.OPENROUTER_APP_NAME || 'AURA AI',
   aiModel,
   aiVisionModel: process.env.AI_VISION_MODEL || DEFAULT_VISION_MODEL,
   openAiApiKey,
-  openAiImageModel: process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1',
-  aiTranscribeModel: process.env.AI_TRANSCRIBE_MODEL || (isOpenRouter ? 'openai/whisper-large-v3' : 'whisper-1'),
-  aiTtsModel: process.env.AI_TTS_MODEL || (isOpenRouter ? 'openai/gpt-4o-mini-tts-2025-12-15' : 'tts-1'),
+  openRouterImageModel: process.env.OPENROUTER_IMAGE_MODEL || 'google/gemini-2.5-flash-image',
+  aiTranscribeModel: process.env.AI_TRANSCRIBE_MODEL || (process.env.OPENAI_API_KEY ? 'whisper-1' : (isOpenRouter ? 'openai/whisper-large-v3' : 'whisper-1')),
+  aiTtsModel: process.env.AI_TTS_MODEL || 'tts-1',
+  elevenLabsApiKey,
+  elevenLabsVoiceId: process.env.ELEVENLABS_VOICE_ID || '',
+  elevenLabsModelId: process.env.ELEVENLABS_MODEL_ID || 'eleven_multilingual_v2',
+  webSearch: {
+    enabled: process.env.WEB_SEARCH_ENABLED === 'true',
+    provider: String(process.env.WEB_SEARCH_PROVIDER || 'tavily').toLowerCase(),
+    tavilyApiKey: process.env.TAVILY_API_KEY || '',
+  },
+  weather: {
+    provider: String(process.env.WEATHER_PROVIDER || 'openweather').toLowerCase(),
+    apiKey: process.env.WEATHER_API_KEY || '',
+  },
 };
 
 const requiredInProduction = [
   'SUPABASE_URL',
   'SUPABASE_ANON_KEY',
-  'OPENROUTER_API_KEY',
 ];
 
 export const validateEnv = () => {
   if (process.env.NODE_ENV !== 'production') return;
 
   const missing = requiredInProduction.filter((k) => !process.env[k] || !String(process.env[k]).trim());
+  if (process.env.NODE_ENV === 'production'
+    && !process.env.OPENROUTER_API_KEY_1
+    && !process.env.OPENROUTER_API_KEY_2
+    && !process.env.OPENROUTER_API_KEY) {
+    missing.push('OPENROUTER_API_KEY_1 (or OPENROUTER_API_KEY)');
+  }
   if (missing.length === 0) return;
 
   const lines = [

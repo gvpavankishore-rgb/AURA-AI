@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate, useOutletContext } from 'react-router-dom';
 import { Menu, Square, RefreshCw, RotateCcw, Sparkles } from 'lucide-react';
-import api from '../services/api';
+import api, { uploadUrl } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import MessageList from '../components/MessageList';
 import ChatInput from '../components/ChatInput';
@@ -17,7 +17,7 @@ const suggestions = [
   { text: 'Debug my JavaScript code', icon: '🔧' },
 ];
 
-const attachmentUrl = (att) => att?.preview || (att?.path ? '/uploads/' + String(att.path).split(/[\\/]/).pop() : '');
+const attachmentUrl = (att) => att?.preview || (att?.path ? uploadUrl(att.path) : '');
 
 export default function ChatPage() {
   const { chatId } = useParams();
@@ -160,10 +160,12 @@ export default function ChatPage() {
       content: '',
       createdAt: new Date().toISOString(),
       isError: false,
+      sources: [],
     };
     setMessages(prev => [...prev, tempAiMsg]);
 
     let fullContent = '';
+    let sources = [];
     let actionReceived = false;
     let stopped = false;
 
@@ -225,6 +227,17 @@ export default function ChatPage() {
             const idx = updated.findIndex(m => m._id === 'streaming');
             if (idx !== -1) updated[idx] = actionMsg;
             else updated.push(actionMsg);
+            return updated;
+          });
+        },
+        onSources: (srcs) => {
+          if (generationRef.current !== gen) return;
+          sources = Array.isArray(srcs) ? srcs : [];
+          setMessages(prev => {
+            const updated = [...prev];
+            const lastIdx = updated.length - 1;
+            if (lastIdx < 0) return updated;
+            updated[lastIdx] = { ...updated[lastIdx], sources };
             return updated;
           });
         },

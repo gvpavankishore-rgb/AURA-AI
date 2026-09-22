@@ -31,9 +31,9 @@ const throwFriendly = (message, statusCode) => {
 };
 
 // Optional app-identification headers for OpenRouter (keys come from env).
-export const buildHeaders = (json = true) => {
+export const buildHeaders = (json = true, key = env.openRouterApiKey) => {
   const headers = {
-    Authorization: `Bearer ${env.openRouterApiKey}`,
+    Authorization: `Bearer ${key}`,
     'HTTP-Referer': env.openRouterSiteUrl,
     'X-Title': env.openRouterAppName,
   };
@@ -42,6 +42,39 @@ export const buildHeaders = (json = true) => {
 };
 
 const baseUrl = () => env.openRouterBaseUrl;
+
+// Two-account failover: a request is first attempted with key 1 and, if it
+// fails (auth, credits, rate limit, 5xx, network, ...), retried with key 2.
+// The failure that ultimately surfaces is the last key's, so no secrets or
+// upstream details leak to the client.
+const withKeyFailover = async ({ url, init }) => {
+  const keys = env.openRouterKeys;
+  if (!keys.length) throw throwFriendly(AI_KEY_MISSING_MESSAGE, 503);
+  const jsonHeaders = Boolean(init.headers && init.headers['Content-Type']);
+
+  let lastErr = null;
+  for (let i = 0; i < keys.length; i += 1) {
+    let res;
+    try {
+      res = await fetch(url, { ...init, headers: buildHeaders(jsonHeaders, keys[i]) });
+    } catch (err) {
+      lastErr = err;
+      if (i < keys.length - 1) {
+        console.error(`[OpenRouter] ${url} attempt ${i + 1}/${keys.length} network error: ${err?.cause?.message || err?.message || err} — failing over to backup key.`);
+      }
+      continue;
+    }
+
+    if (res.ok) return res;
+
+    const raw = await res.text().catch(() => '');
+    lastErr = mapHttpError({ urlPath: url, res, raw });
+    if (i < keys.length - 1) {
+      console.error(`[OpenRouter] ${url} HTTP ${res.status} with key ${i + 1}/${keys.length} — failing over to backup key.`);
+    }
+  }
+  throw lastErr;
+};
 
 // Map an OpenRouter error response (or an embedded error object) to a
 // user-friendly message. The full upstream details are logged server-side.
@@ -101,13 +134,19 @@ const postJson = async ({ urlPath, body, timeoutMs = 120000 }) => {
   const url = `${baseUrl()}/${urlPath}`;
   let res;
   try {
-    res = await fetch(url, {
-      method: 'POST',
-      headers: buildHeaders(true),
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
+    res = await withKeyFailover({
+      url,
+      init: {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(timeoutMs),
+      },
     });
   } catch (err) {
+    // A friendly error surfaced by the failover chain is already mapped for
+    // the user; only raw network/abort errors are re-mapped here.
+    if (err && err.statusCode) throw err;
     const timedOut = err?.name === 'TimeoutError' || err?.cause?.name === 'TimeoutError' || err?.message?.includes('aborted');
     console.error(`[OpenRouter] ${urlPath} network error:`, timedOut ? 'timeout' : (err?.cause?.message || err?.message || err));
     throw throwFriendly(timedOut ? AI_TIMEOUT_MESSAGE : AI_NETWORK_MESSAGE, timedOut ? 504 : 503);
@@ -119,13 +158,17 @@ const postForm = async ({ urlPath, form, timeoutMs = 120000 }) => {
   const url = `${baseUrl()}/${urlPath}`;
   let res;
   try {
-    res = await fetch(url, {
-      method: 'POST',
-      headers: buildHeaders(false),
-      body: form,
-      signal: AbortSignal.timeout(timeoutMs),
+    res = await withKeyFailover({
+      url,
+      init: {
+        method: 'POST',
+        headers: {},
+        body: form,
+        signal: AbortSignal.timeout(timeoutMs),
+      },
     });
   } catch (err) {
+    if (err && err.statusCode) throw err;
     const timedOut = err?.name === 'TimeoutError' || err?.cause?.name === 'TimeoutError' || err?.message?.includes('aborted');
     console.error(`[OpenRouter] ${urlPath} network error:`, timedOut ? 'timeout' : (err?.cause?.message || err?.message || err));
     throw throwFriendly(timedOut ? AI_TIMEOUT_MESSAGE : AI_NETWORK_MESSAGE, timedOut ? 504 : 503);
@@ -143,10 +186,11 @@ export const chatCompletions = async ({ model, messages, stream, max_tokens = 40
 
 // OpenRouter image generation uses POST /images (NOT OpenAI's
 // /images/generations). Response shape: { data: [{ b64_json, media_type }] }.
-export const createImage = async ({ model, prompt, size }) => {
-  const body = { model, prompt, n: 1 };
-  if (size) body.size = size;
-  const res = await postJson({ urlPath: 'images', body });
+// The request body is the minimal, universally-supported shape { model, prompt }
+// (per OpenRouter's ImageGenerationRequest schema); per-model optional
+// parameters are not sent so every image model works without a 400.
+export const createImage = async ({ model, prompt }) => {
+  const res = await postJson({ urlPath: 'images', body: { model, prompt } });
   const raw = await res.text().catch(() => '');
   let data;
   try {
@@ -162,6 +206,7 @@ export const createImage = async ({ model, prompt, size }) => {
   return {
     image: item.b64_json,
     mediaType: item.media_type || 'image/png',
+    revisedPrompt: item.revised_prompt || null,
   };
 };
 

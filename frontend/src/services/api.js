@@ -1,6 +1,36 @@
 import { supabase } from '../lib/supabase';
 
-const BASE = '/api';
+// API base URL.
+//
+// - Production (Render static site): set VITE_API_URL to the deployed backend
+//   origin (e.g. https://aura-ai-backend-tpe2.onrender.com). Because VITE_*
+//   variables are baked in at BUILD time, the already-deployed bundle does NOT
+//   pick this up until the frontend is rebuilt and redeployed.
+// - Local development: set VITE_API_URL=http://localhost:5001, OR leave it
+//   blank to fall back to the relative '/api' used by the Vite dev proxy
+//   (frontend/vite.config.js proxies /api -> localhost:5001). Production must
+//   never rely on that proxy, so the fallback '/api' must NOT be used when the
+//   backend is deployed on a separate origin.
+//
+// The variable holds the backend ORIGIN (no trailing slash, no '/api' segment).
+// '/api' is appended here. If someone instead configures VITE_API_URL to end
+// with '/api', it is kept as-is so we never produce a doubled
+// "…/api/api/…" or reversed "…//api" path.
+const rawApiUrl = (import.meta.env.VITE_API_URL || '').trim().replace(/\/+$/, '');
+const BASE = rawApiUrl.endsWith('/api')
+  ? rawApiUrl
+  : (rawApiUrl ? `${rawApiUrl}/api` : '/api');
+const ORIGIN = rawApiUrl ? rawApiUrl.replace(/\/api$/, '') : '';
+
+// Resolve a backend-served upload path. `path` is the stored filename (e.g.
+// "uuid.png" or "subdir/uuid.png"). In production the backend is a different
+// origin, so the URL must be absolutized here; locally it stays relative and
+// the Vite dev proxy (/uploads -> localhost:5001) handles it.
+export const uploadUrl = (path) => {
+  if (!path) return '';
+  const filename = String(path).split(/[\\/]/).pop();
+  return ORIGIN ? `${ORIGIN}/uploads/${filename}` : `/uploads/${filename}`;
+};
 
 const FALLBACK_ERROR = 'Something went wrong. Please try again.';
 export const NETWORK_ERROR_MESSAGE = 'Network error. Please check your connection and try again.';
@@ -148,7 +178,7 @@ class ApiService {
   async sendMessage(data) { return this.request('/chat/message', { method: 'POST', body: data, retries: 0 }); }
 
   async streamMessage(payload, {
-    onMeta, onDeveloper, onAction, onChunk, onDone, onError, onAbort, signal,
+    onMeta, onDeveloper, onAction, onSources, onChunk, onDone, onError, onAbort, signal,
   } = {}) {
     // Internal watchdog keeps the call from hanging forever without
     // interfering with the caller's own abort (Stop generation) signal.
@@ -254,6 +284,7 @@ class ApiService {
               if (parsed.error) return finish(onError, parsed.error);
               if (parsed.type === 'developer_profile') { onDeveloper?.(parsed); }
               else if (parsed.type === 'action_confirmation') { onAction?.(parsed); }
+              else if (parsed.type === 'sources') { onSources?.(Array.isArray(parsed.sources) ? parsed.sources : []); }
               else if (parsed.chatId) { onMeta?.(parsed); }
               else if (parsed.content) { onChunk?.(parsed.content); }
             } catch {}
