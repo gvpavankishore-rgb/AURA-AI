@@ -230,40 +230,6 @@ export const processMessage = async ({ messages, memories = [], mode = 'chat', a
   }
 };
 
-const IMAGE_GEN_NOT_CONFIGURED = 'OpenRouter image generation is not configured.';
-const IMAGE_GEN_CREDITS = 'OpenRouter image generation requires available credits.';
-const IMAGE_GEN_AUTH = 'OpenRouter authentication failed for image generation.';
-const IMAGE_GEN_RATE_LIMIT = 'Image generation is temporarily rate limited. Please try again.';
-const IMAGE_GEN_UNAVAILABLE = 'Image generation service is temporarily unavailable.';
-
-// Image generation always goes through OpenRouter's dedicated images endpoint
-// (POST /images) using the existing OPENROUTER_API_KEY_1 -> OPENROUTER_API_KEY_2
-// two-account failover implemented in the OpenRouter provider. The direct
-// OpenAI Images API is intentionally NOT used, so image generation can never
-// depend on OPENAI_API_KEY or OpenAI billing.
-export const generateImage = async (prompt) => {
-  if (!env.hasAiKey) {
-    const err = new Error(IMAGE_GEN_NOT_CONFIGURED);
-    err.statusCode = 503;
-    throw err;
-  }
-  try {
-    return await openRouter.createImage({ model: env.openRouterImageModel, prompt });
-  } catch (err) {
-    // Safe backend-only log of the underlying (already sanitised) cause. The
-    // client is told the real reason (missing keys / credits / auth / rate
-    // limit) without ever exposing provider secrets or raw error bodies.
-    console.error('[Image Generation] OpenRouter image generation failed:', err?.statusCode ? `HTTP ${err.statusCode}` : `network ${err?.message || err}`);
-    let friendly = IMAGE_GEN_UNAVAILABLE;
-    if (err?.message === openRouter.AI_BILLING_MESSAGE) friendly = IMAGE_GEN_CREDITS;
-    else if (err?.message === openRouter.AI_AUTH_ERROR_MESSAGE) friendly = IMAGE_GEN_AUTH;
-    else if (err?.message === openRouter.AI_RATE_LIMIT_MESSAGE) friendly = IMAGE_GEN_RATE_LIMIT;
-    const rethrown = new Error(friendly);
-    rethrown.statusCode = err?.statusCode && err.statusCode > 500 ? err.statusCode : 502;
-    throw rethrown;
-  }
-};
-
 export const analyzeImage = async (imagePath, question) => {
   if (!env.hasAiKey) throw new Error(openRouter.AI_KEY_MISSING_MESSAGE);
 

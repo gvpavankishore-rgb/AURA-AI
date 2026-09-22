@@ -387,62 +387,6 @@ export default function ChatPage() {
     return { success: true };
   }, [user, runStream]);
 
-  const handleGenerateImage = async (prompt) => {
-    const trimmed = String(prompt || '').trim();
-    if (!trimmed) return { ok: false };
-    if (!user) {
-      setPendingMessage({ content: trimmed });
-      setShowAuthModal(true);
-      return { ok: false };
-    }
-    if (loading || streaming) return { ok: false };
-    const genId = 'img-' + Date.now();
-    setLoading(true);
-    try {
-      const genUserMsg = {
-        _id: 'gen-user-' + genId,
-        role: 'user',
-        content: trimmed,
-        createdAt: new Date().toISOString(),
-      };
-      setMessages(prev => [...prev, genUserMsg]);
-      const res = await api.generateImage({ prompt: trimmed, conversationId: chatRef.current });
-      if (!res.success) throw new Error(res.message || 'Image generation failed.');
-      const data = res.data || {};
-      const image = data.image;
-      if (!image) throw new Error('No image was generated.');
-      const chatId = data.chatId;
-      if (chatId && chatRef.current !== chatId) {
-        chatRef.current = chatId;
-        navigate(`/chat/${chatId}`, { replace: true });
-        window.dispatchEvent(new CustomEvent('aura:history-updated'));
-        return { ok: true };
-      }
-      const mediaType = data.mediaType || 'image/png';
-      const assistantMsg = {
-        _id: 'gen-ai-' + genId,
-        role: 'assistant',
-        content: data.revisedPrompt || trimmed,
-        attachments: [{ type: 'image', filename: '', preview: `data:${mediaType};base64,${image}`, generated: true }],
-        createdAt: new Date().toISOString(),
-      };
-      setMessages(prev => [...prev, assistantMsg]);
-      window.dispatchEvent(new CustomEvent('aura:history-updated'));
-      return { ok: true };
-    } catch (err) {
-      setMessages(prev => [...prev, {
-        _id: 'gen-err-' + Date.now(),
-        role: 'assistant',
-        content: err.message || 'Image generation failed.',
-        isError: true,
-        createdAt: new Date().toISOString(),
-      }]);
-      return { ok: false };
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const handleEnhanceImage = useCallback(async (msg) => {
     if (!user) { setShowAuthModal(true); return; }
     if (loading || streaming) return;
@@ -612,7 +556,6 @@ export default function ChatPage() {
         onSend={handleSend}
         onStop={handleStop}
         loading={loading}
-        onGenerateImage={handleGenerateImage}
         placeholder={user ? 'Ask AURA anything...' : 'Sign in to start chatting...'}
       />
 

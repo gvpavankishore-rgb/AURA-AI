@@ -51,7 +51,6 @@ Copy `.env.example` to `backend/.env` and configure:
 | `AI_PROVIDER` | AI provider name (default: openai) |
 | `AI_API_KEY` | AI provider API key (server-only) |
 | `AI_MODEL` | Chat model (default: gpt-4o) |
-| `AI_IMAGE_MODEL` | Image model (default: dall-e-3) |
 | `AI_BASE_URL` | OpenAI-compatible API base URL (default: https://api.openai.com/v1) |
 | `CLIENT_URL` | Frontend URL (default: http://localhost:5173) |
 
@@ -71,7 +70,7 @@ cd frontend && npm run dev
 
 - **Chat:** Unified AI chat with markdown, code highlighting, streaming
 - **Voice:** Speech-to-text and text-to-speech
-- **Images:** Image generation (DALL-E) and image analysis (GPT-4o vision)
+- **Images:** Image analysis and enhancement
 - **Documents:** PDF/DOCX/TXT upload, Q&A, summarization
 - **Coding:** Code generation, explanation, debugging, optimization
 - **Translation:** Multi-language translation (20+ languages)

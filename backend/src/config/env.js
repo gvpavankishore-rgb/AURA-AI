@@ -83,20 +83,15 @@ if (!hasExplicitVisionModel) {
   console.warn('  [AURA] Set AI_VISION_MODEL in backend/.env if you use a different vision-capable model.');
 }
 
-// Image generation uses OpenRouter's dedicated images endpoint (POST /images)
-// with OPENROUTER_IMAGE_MODEL and the same OPENROUTER_API_KEY_1 /
-// OPENROUTER_API_KEY_2 two-account failover used by chat. The direct OpenAI
-// Images API is never used, so image generation does NOT depend on
-// OPENAI_API_KEY or OpenAI billing. OPENAI_API_KEY (when present) is only
-// used for optional direct-OpenAI voice features (whisper / tts).
+// Image upload + vision analysis uses a vision-capable OpenRouter model (see
+// AI_VISION_MODEL above). OPENAI_API_KEY (when present) is only used for
+// optional direct-OpenAI voice features (whisper / tts).
 const openAiApiKey = process.env.OPENAI_API_KEY || '';
 if (!openAiApiKey) {
   console.warn('\n  ##############################################################');
   console.warn('  ##  OPENAI_API_KEY is optional.                            ##');
-  console.warn('  ##  Image generation always uses OpenRouter (OPENROUTER_   ##');
-  console.warn('  ##  IMAGE_MODEL + OPENROUTER_API_KEY_1 / _2). OPENAI_API_  ##');
-  console.warn('  ##  KEY is only needed for direct-OpenAI voice features    ##');
-  console.warn('  ##  (whisper / tts); without it those fall back to         ##');
+  console.warn('  ##  It is only needed for direct-OpenAI voice features     ##');
+  console.warn('  ##  (whisper / tts); without it voice falls back to        ##');
   console.warn('  ##  OpenRouter / ElevenLabs.                               ##');
   console.warn('  ##############################################################\n');
 }
@@ -134,7 +129,6 @@ export default {
   aiModel,
   aiVisionModel: process.env.AI_VISION_MODEL || DEFAULT_VISION_MODEL,
   openAiApiKey,
-  openRouterImageModel: process.env.OPENROUTER_IMAGE_MODEL || 'google/gemini-2.5-flash-image',
   aiTranscribeModel: process.env.AI_TRANSCRIBE_MODEL || (process.env.OPENAI_API_KEY ? 'whisper-1' : (isOpenRouter ? 'openai/whisper-large-v3' : 'whisper-1')),
   aiTtsModel: process.env.AI_TTS_MODEL || 'tts-1',
   elevenLabsApiKey,

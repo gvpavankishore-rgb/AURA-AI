@@ -3,7 +3,7 @@ import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { AppError } from '../middleware/errorHandler.js';
 import { success } from '../utils/response.js';
-import { generateImage, analyzeImage } from '../services/aiService.js';
+import { analyzeImage } from '../services/aiService.js';
 import { enhanceImage } from '../services/imageEnhance.js';
 import Conversation from '../models/Conversation.js';
 import Message from '../models/Message.js';
@@ -33,42 +33,6 @@ const persistImageMessage = async ({ user, conversationId, prompt, content, atta
   chat.updatedAt = new Date();
   await chat.save();
   return chat;
-};
-
-export const generate = async (req, res, next) => {
-  try {
-    const body = req.body || {};
-    const { prompt, size, conversationId } = body;
-    if (!prompt || !String(prompt).trim()) throw new AppError('Prompt is required', 400);
-    const result = await generateImage(String(prompt), size || '1024x1024');
-    console.log(`[Images] generate "${String(prompt).slice(0, 60)}" -> ${result.mediaType}, ${Math.round((result.image.length * 3) / 4 / 1024)} KB image returned.`);
-    let chatId = null;
-    if (req.user) {
-      ensureAiDir();
-      const buffer = Buffer.from(result.image, 'base64');
-      const mime = result.mediaType || 'image/png';
-      const ext = mime.includes('png') ? 'png' : mime.includes('svg') ? 'svg' : mime.includes('webp') ? 'webp' : 'jpg';
-      const name = `${uuidv4()}.${ext}`;
-      fs.writeFileSync(path.join(aiDir, name), buffer);
-      const chat = await persistImageMessage({
-        user: req.user,
-        conversationId,
-        prompt: String(prompt),
-        content: result.revisedPrompt || String(prompt),
-        attachment: {
-          type: 'image',
-          filename: '',
-          path: `uploads/ai/${name}`,
-          mimetype: mime,
-        },
-      });
-      chatId = chat._id;
-      console.log(`[Images] Persisted generated image to uploads/ai/${name} (chat ${String(chatId)})`);
-    }
-    success(res, { image: result.image, mediaType: result.mediaType, revisedPrompt: result.revisedPrompt, chatId });
-  } catch (err) {
-    next(err);
-  }
 };
 
 export const enhance = async (req, res, next) => {

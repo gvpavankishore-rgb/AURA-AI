@@ -1769,42 +1769,6 @@ input::placeholder, textarea::placeholder {
 }
 .composer-translate .remove-btn:hover { color: var(--danger); background: var(--bg-hover); }
 
-.composer-imagegen {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: min(560px, 100%);
-  margin-bottom: 10px;
-  padding: 7px 8px 7px 12px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  animation: menuIn 160ms ease;
-}
-
-.composer-tool-icon { color: var(--accent); flex-shrink: 0; }
-
-.imagegen-input {
-  flex: 1;
-  min-width: 0;
-  background: transparent;
-  border: none;
-  outline: none;
-  color: var(--text-primary);
-  font-size: 13.5px;
-  font-family: inherit;
-  padding: 4px 0;
-}
-.imagegen-input::placeholder { color: var(--text-tertiary); }
-
-.composer-imagegen .remove-btn {
-  padding: 3px;
-  color: var(--text-tertiary);
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-.composer-imagegen .remove-btn:hover { color: var(--danger); background: var(--bg-hover); }
-
 .composer-mode {
   display: inline-flex;
   align-items: center;

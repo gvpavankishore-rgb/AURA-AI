@@ -184,32 +184,6 @@ export const chatCompletions = async ({ model, messages, stream, max_tokens = 40
   return res;
 };
 
-// OpenRouter image generation uses POST /images (NOT OpenAI's
-// /images/generations). Response shape: { data: [{ b64_json, media_type }] }.
-// The request body is the minimal, universally-supported shape { model, prompt }
-// (per OpenRouter's ImageGenerationRequest schema); per-model optional
-// parameters are not sent so every image model works without a 400.
-export const createImage = async ({ model, prompt }) => {
-  const res = await postJson({ urlPath: 'images', body: { model, prompt } });
-  const raw = await res.text().catch(() => '');
-  let data;
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    throw throwFriendly(AI_INVALID_RESPONSE_MESSAGE, 502);
-  }
-  const item = data?.data?.[0];
-  if (!item || typeof item.b64_json !== 'string') {
-    console.error('[OpenRouter] Malformed image response:', raw.slice(0, 500));
-    throw throwFriendly(AI_INVALID_RESPONSE_MESSAGE, 502);
-  }
-  return {
-    image: item.b64_json,
-    mediaType: item.media_type || 'image/png',
-    revisedPrompt: item.revised_prompt || null,
-  };
-};
-
 // OpenAI-style multipart transcription upload (matches OpenRouter contract).
 export const transcribeAudio = async ({ model, formData }) => {
   const res = await postForm({ urlPath: 'audio/transcriptions', form: formData });

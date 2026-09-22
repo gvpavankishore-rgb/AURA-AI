@@ -321,8 +321,6 @@ class ApiService {
   async askDocument(id, question) { return this.request(`/documents/${id}/ask`, { method: 'POST', body: { question }, retries: 0 }); }
   async summarizeDocument(id) { return this.request(`/documents/${id}/summarize`, { method: 'POST', retries: 0 }); }
 
-  async generateImage(data) { return this.request('/images/generate', { method: 'POST', body: data, retries: 0, timeout: 120000 }); }
-
   async enhanceImage(file, conversationId) {
     const form = new FormData();
     form.append('image', file);
@@ -341,38 +339,6 @@ class ApiService {
     const form = new FormData();
     form.append('audio', file);
     return this.request('/voice/transcribe', { method: 'POST', body: form, retries: 0, timeout: 120000 });
-  }
-  async textToSpeech(data) { return this.request('/voice/speak', { method: 'POST', body: data, retries: 0, timeout: 120000 }); }
-
-  async speakText(text, { voice = 'alloy', speed = 1 } = {}) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 120000);
-    try {
-      const res = await fetch(`${BASE}/voice/speak`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
-        },
-        body: JSON.stringify({ text, voice, speed }),
-        signal: controller.signal,
-      });
-      if (!res.ok) {
-        let message = 'Voice generation failed.';
-        try {
-          const parsed = await res.json();
-          if (parsed && typeof parsed.message === 'string' && parsed.message) message = parsed.message;
-        } catch {}
-        throw new Error(message);
-      }
-      const blob = await res.blob();
-      return URL.createObjectURL(blob);
-    } catch (err) {
-      if (controller.signal.aborted) throw new Error('Voice generation timed out. Please try again.');
-      throw err;
-    } finally {
-      clearTimeout(timer);
-    }
   }
 
   async translate(data) { return this.request('/translate', { method: 'POST', body: data, retries: 0 }); }

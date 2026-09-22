@@ -2,9 +2,8 @@ import { useState, useRef, useEffect, forwardRef, useImperativeHandle, lazy, Sus
 import TextareaAutosize from 'react-textarea-autosize';
 import {
   Plus, Mic, Square, Image as ImageIcon, FileUp, Camera, ArrowLeftRight,
-  FileText, Languages, ArrowUp, X, AudioLines, AlertTriangle, Wand2, Braces,
+  FileText, Languages, ArrowUp, X, AudioLines, AlertTriangle, Braces,
 } from 'lucide-react';
-import api from '../services/api';
 import SmartImage from './SmartImage';
 import { compressImage } from '../utils/image';
 
@@ -42,12 +41,13 @@ const DRAFT_KEY = 'aura:chat-draft';
 
 const SUPPORTED_PASTE_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp'];
 
-const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, placeholder, onGenerateImage }, ref) {
+const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, placeholder }, ref) {
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState([]);
   const [recording, setRecording] = useState(false);
   const [voiceMode, setVoiceMode] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
+  const [voiceError, setVoiceError] = useState('');
   const [menuOpen, setMenuOpen] = useState(false);
   const [translateMode, setTranslateMode] = useState(false);
   const [sourceLanguage, setSourceLanguage] = useState('');
@@ -56,7 +56,6 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
   const [dragActive, setDragActive] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [cameraOpen, setCameraOpen] = useState(false);
-  const [imageGenerationMode, setImageGenerationMode] = useState(false);
   const [codingMode, setCodingMode] = useState(false);
   const textareaRef = useRef(null);
   const dragDepth = useRef(0);
@@ -72,13 +71,10 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
       setTranslateMode(false);
       setTranscribing(false);
       setSubmitting(false);
-      try { mediaRecorder.current?.stop(); } catch { /* ignore */ }
-      streamRef.current?.getTracks().forEach(t => t.stop());
-      mediaRecorder.current = null;
-      streamRef.current = null;
+      stopVoiceRecognition();
       setCameraOpen(false);
-      setImageGenerationMode(false);
       setRecording(false);
+      setVoiceError('');
       textareaRef.current?.focus();
     },
     setDraft: (text) => {
@@ -92,11 +88,12 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
   const fileInputRef = useRef(null);
   const imageInputRef = useRef(null);
   const docInputRef = useRef(null);
-  const mediaRecorder = useRef(null);
-  const audioChunks = useRef([]);
-  const streamRef = useRef(null);
   const autoSendRef = useRef(false);
   const previewUrlsRef = useRef([]);
+  const recognitionRef = useRef(null);
+  const finalTranscriptRef = useRef('');
+  const interimTranscriptRef = useRef('');
+  const voiceBaseRef = useRef('');
 
   const releasePreviewUrl = (url) => {
     if (!url || !url.startsWith('blob:')) return;
@@ -147,28 +144,6 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
   const handleSend = async () => {
     if (loading || transcribing || submitting || busyAttachments) return;
     const trimmed = text.trim();
-
-    // Image generation mode reuses the SAME composer + Send button. The typed
-    // prompt goes straight to the image generator; on success the input is
-    // cleared and mode is exited (matching the existing UX), on failure the
-    // prompt is kept so the user can retry.
-    if (imageGenerationMode) {
-      if (!trimmed) return;
-      setSubmitting(true);
-      if (typeof onGenerateImage === 'function') {
-        const result = await onGenerateImage(trimmed);
-        if (result && result.ok) {
-          setText('');
-          setAttachments([]);
-          releaseAllPreviewUrls();
-          setMenuOpen(false);
-          setImageGenerationMode(false);
-        }
-      }
-      setSubmitting(false);
-      textareaRef.current?.focus();
-      return;
-    }
 
     if (!trimmed && attachments.length === 0) return;
     let content = trimmed;
@@ -327,9 +302,134 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
     addAttachmentList(files.filter(f => !f.type.startsWith('image/')), 'file');
   };
 
-  const teardownRecorder = () => {
-    mediaRecorder.current?.stop();
-    streamRef.current?.getTracks().forEach(t => t.stop());
+  const speechRecognitionSupported = () => {
+    if (typeof window === 'undefined') return null;
+    return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+  };
+
+  const startVoiceListening = (autoSend) => {
+    const SR = speechRecognitionSupported();
+    if (!SR) {
+      setVoiceError('Voice input is not supported in this browser.');
+      setRecording(false);
+      return;
+    }
+    autoSendRef.current = autoSend;
+    voiceBaseRef.current = text;
+    finalTranscriptRef.current = '';
+    interimTranscriptRef.current = '';
+    setVoiceError('');
+
+    const recognition = new SR();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = '';
+    recognitionRef.current = recognition;
+
+    recognition.onstart = () => {
+      setRecording(true);
+      setVoiceError('');
+    };
+
+    recognition.onresult = (event) => {
+      let final = '';
+      let interim = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = event.results[i][0]?.transcript || '';
+        if (event.results[i].isFinal) final += transcript;
+        else interim += transcript;
+      }
+      finalTranscriptRef.current = final;
+      interimTranscriptRef.current = interim;
+      const combined = [voiceBaseRef.current, final + interim].filter(Boolean).join(' ');
+      setText(combined);
+    };
+
+    recognition.onerror = (event) => {
+      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+        setVoiceError('Microphone permission is required for voice input.');
+        setRecording(false);
+      } else if (event.error !== 'aborted' && event.error !== 'no-speech') {
+        setVoiceError('Voice input failed. Please try again.');
+        setRecording(false);
+      }
+    };
+
+    recognition.onend = () => {
+      recognitionRef.current = null;
+      const final = (finalTranscriptRef.current || '').trim();
+      const baseText = voiceBaseRef.current;
+      voiceBaseRef.current = '';
+      setRecording(false);
+      setTranscribing(false);
+      setVoiceError('');
+      textareaRef.current?.focus();
+      if (autoSendRef.current) {
+        autoSendRef.current = false;
+        setVoiceMode(false);
+        const combined = [baseText, final].filter(Boolean).join(' ');
+        if (combined) {
+          setSubmitting(true);
+          onSend({ content: combined, attachments: [], mode: codingMode ? 'coding' : undefined })
+            .then((result) => {
+              setSubmitting(false);
+              if (result && result.success) {
+                setText('');
+                setAttachments([]);
+                releaseAllPreviewUrls();
+                setMenuOpen(false);
+              } else {
+                setText(combined);
+              }
+            })
+            .catch(() => {
+              setSubmitting(false);
+              setText(combined);
+            });
+        }
+      }
+    };
+
+    try {
+      recognition.start();
+    } catch {
+      recognitionRef.current = null;
+      setVoiceError('Voice input failed to start. Please try again.');
+      setRecording(false);
+    }
+  };
+
+  const stopVoiceRecognition = (autoSend = false) => {
+    if (autoSend) autoSendRef.current = true;
+    const recognition = recognitionRef.current;
+    recognitionRef.current = null;
+    if (recognition) {
+      try { recognition.stop(); } catch { /* already closed */ }
+    }
+    setRecording(false);
+    setTranscribing(false);
+  };
+
+  const toggleMic = () => {
+    if (loading || transcribing || submitting) return;
+    if (recording) {
+      setVoiceMode(false);
+      stopVoiceRecognition(false);
+      return;
+    }
+    setVoiceMode(false);
+    startVoiceListening(false);
+  };
+
+  const toggleVoiceMode = () => {
+    if (loading || transcribing || submitting) return;
+    if (recording) {
+      stopVoiceRecognition(true);
+      return;
+    }
+    setVoiceMode(true);
+    setText('');
+    startVoiceListening(true);
   };
 
   const openCamera = () => {
@@ -337,82 +437,9 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
     setCameraOpen(true);
   };
 
-  const finishRecording = (autoSend) => {
-    autoSendRef.current = autoSend;
-    teardownRecorder();
-    setRecording(false);
-  };
-
-  const beginRecording = () => {
-    (async () => {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        streamRef.current = stream;
-        mediaRecorder.current = new MediaRecorder(stream);
-        audioChunks.current = [];
-        mediaRecorder.current.ondataavailable = (e) => audioChunks.current.push(e.data);
-        mediaRecorder.current.onstop = () => {
-          const blob = new Blob(audioChunks.current, { type: 'audio/webm' });
-          const file = new File([blob], 'voice.webm', { type: 'audio/webm' });
-          handleVoiceResult(file);
-        };
-        mediaRecorder.current.start();
-        setRecording(true);
-      } catch {
-        setRecording(false);
-        setVoiceMode(false);
-      }
-    })();
-  };
-
-  const handleVoiceResult = async (file) => {
-    const sendDirectly = autoSendRef.current;
-    autoSendRef.current = false;
-    setVoiceMode(false);
-
-    if (sendDirectly) {
-      onSend({ content: '', attachments: [{ file, name: 'Voice recording', type: 'audio/webm', isVoice: true }] });
-      return;
-    }
-
-    setTranscribing(true);
-    try {
-      const res = await api.transcribeAudio(file);
-      if (res.success && res.data?.text) {
-        setText(prev => (prev.trim() + (prev.trim() ? ' ' : '') + res.data.text).trim());
-      } else {
-        setAttachments(prev => [...prev, { file, name: 'Voice recording', type: 'audio/webm', isVoice: true }]);
-      }
-    } catch {
-      setAttachments(prev => [...prev, { file, name: 'Voice recording', type: 'audio/webm', isVoice: true }]);
-    }
-    setTranscribing(false);
-    textareaRef.current?.focus();
-  };
-
-  const toggleMic = () => {
-    if (loading || transcribing || submitting) return;
-    if (recording) {
-      finishRecording(false);
-      return;
-    }
-    setVoiceMode(false);
-    beginRecording();
-  };
-
-  const toggleVoiceMode = () => {
-    if (loading || transcribing || submitting) return;
-    if (recording) {
-      finishRecording(true);
-      return;
-    }
-    setVoiceMode(true);
-    setText('');
-    beginRecording();
-  };
-
   useEffect(() => () => {
-    streamRef.current?.getTracks().forEach(t => t.stop());
+    try { recognitionRef.current?.abort?.(); } catch { /* ignore */ }
+    recognitionRef.current = null;
     releaseAllPreviewUrls();
   }, []);
 
@@ -424,11 +451,9 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
         ? 'Ask for code, debugging, or explanation...'
         : translateMode
           ? `Type text to translate to ${translateTargets.find(l => l.code === targetLanguage)?.name || 'Spanish'}...`
-          : imageGenerationMode
-            ? 'Describe the image you want to create...'
-            : attachments.length > 0
-            ? 'Ask about this...'
-            : (placeholder || 'Ask AURA anything...');
+          : attachments.length > 0
+          ? 'Ask about this...'
+          : (placeholder || 'Ask AURA anything...');
 
   return (
     <div className={`input-area ${dragActive ? 'drag-active' : ''}`}
@@ -470,16 +495,6 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
               title="Close translation"
             >
               <X size={13} />
-            </button>
-          </div>
-        )}
-
-        {imageGenerationMode && (
-          <div className="composer-mode">
-            <Wand2 size={13} />
-            Image generation
-            <button className="remove-btn" onClick={() => setImageGenerationMode(false)} aria-label="Disable image generation" title="Disable image generation">
-              <X size={12} />
             </button>
           </div>
         )}
@@ -593,9 +608,6 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
                 <button role="menuitem" onClick={() => { setTranslateMode(o => !o); setMenuOpen(false); }}>
                   <Languages size={16} /> {translateMode ? 'Close translation' : 'Translate'}
                 </button>
-                <button role="menuitem" onClick={() => { setImageGenerationMode(o => !o); setMenuOpen(false); }}>
-                  <Wand2 size={16} /> {imageGenerationMode ? 'Exit image generation' : 'Create image'}
-                </button>
                 <button role="menuitem" onClick={() => { setCodingMode(o => !o); setMenuOpen(false); }}>
                   <Braces size={16} /> {codingMode ? 'Exit coding mode' : 'Coding mode'}
                 </button>
@@ -632,11 +644,11 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
               <button
                 className="composer-round stop"
                 onClick={() => {
-                  if (voiceMode) finishRecording(true);
-                  else finishRecording(false);
+                  if (voiceMode) stopVoiceRecognition(true);
+                  else stopVoiceRecognition(false);
                 }}
                 aria-label="Stop recording"
-                title={voiceMode ? 'Stop and send' : 'Stop and transcribe'}
+                title={voiceMode ? 'Stop and send' : 'Stop'}
               >
                 <Square size={16} fill="currentColor" />
               </button>
@@ -676,14 +688,18 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
 
         <div className="composer-hint">
           {recording
-            ? 'Recording... tap stop to finish'
+            ? voiceMode
+              ? 'Listening... tap stop to send'
+              : 'Listening... tap stop to finish'
             : transcribing
-              ? 'Transcribing...'
+              ? 'Processing...'
               : loading
                 ? 'Generating response...'
                 : busyAttachments
                   ? 'Optimizing images before sending...'
-                  : 'Enter to send · Shift+Enter for new line'}
+                  : voiceError
+                    ? voiceError
+                    : 'Enter to send · Shift+Enter for new line'}
         </div>
       </div>
 

@@ -2,13 +2,13 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { Copy, Check, Download, FileText, Pencil, RefreshCw, CircleAlert, Volume2, Pause, Sparkles, Loader2, ArrowDown } from 'lucide-react';
+import { Copy, Check, Download, FileText, Pencil, RefreshCw, CircleAlert, Volume2, Pause, Sparkles, ArrowDown } from 'lucide-react';
 import { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback, memo } from 'react';
 import ChatAvatar from './ChatAvatar';
 import ActionPermissionCard from './ActionPermissionCard';
 import DeveloperProfileCard from './DeveloperProfileCard';
 import { useAuth } from '../context/AuthContext';
-import api, { uploadUrl } from '../services/api';
+import { uploadUrl } from '../services/api';
 import useAutoScroll from '../hooks/useAutoScroll';
 import SmartImage from './SmartImage';
 
@@ -29,13 +29,48 @@ const downloadAttachment = (att) => {
   a.remove();
 };
 
-const stripCodeForSpeech = (text) =>
-  String(text || '')
-    .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/`[^`]*`/g, ' ')
+// Convert markdown to clean text for speech. Strips code blocks, inline code,
+// emphasis/heading/list markers, markdown links, images, URLs, and collapses to
+// a single line, so speechSynthesis never reads "hash-hash-bold asterisk".
+const stripMarkdownForSpeech = (text) => {
+  let clean = String(text || '')
+    .replace(/```[\s\S]*?```/g, ' Code omitted. ')
+    .replace(/`([^`]*)`/g, '$1 ')
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, ' ')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1 ')
+    .replace(/^#{1,6}\s*/gm, ' ')
+    .replace(/^\s*([-*+]|\d+[.)])\s+/gm, ' ')
+    .replace(/[*_~>|]/g, ' ')
+    .replace(/https?:\/\/\S+/gi, ' ')
     .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 3500);
+    .trim();
+
+  // Avoid speaking raw JSON / metadata blobs - summarize instead.
+  const stripped = clean;
+  if (stripped.startsWith('{') && stripped.includes('}') && (stripped.includes('":"') || stripped.includes("':'") || stripped.includes('":'))) {
+    clean = 'The response contains structured data. Please view it in the chat.';
+  }
+
+  return clean.slice(0, 3500);
+};
+
+const getVoicesHydrated = () => {
+  if (typeof window === 'undefined' || !window.speechSynthesis) return;
+  try { window.speechSynthesis.getVoices(); } catch { /* ignore */ }
+};
+
+const pickTtsVoice = () => {
+  if (typeof window === 'undefined' || !window.speechSynthesis) return null;
+  getVoicesHydrated();
+  let voices = [];
+  try { voices = window.speechSynthesis.getVoices() || []; } catch { voices = []; }
+  const priority = ['en-IN', 'en-US', 'en-GB', 'en'];
+  for (const lang of priority) {
+    const match = voices.find(v => String(v.lang || '').toLowerCase().startsWith(lang));
+    if (match) return match;
+  }
+  return voices[0] || null;
+};
 
 const CodeBlock = memo(function CodeBlock({ language, children }) {
   const [copied, setCopied] = useState(false);
@@ -260,18 +295,16 @@ const MessageItem = memo(function MessageItem({ msg, isLast, streaming, user, on
               <button
                 onClick={() => onToggleSpeak?.(msg)}
                 disabled={busy}
-                aria-label={speaker.msgId === msg._id && !speaker.paused ? 'Pause playback' : 'Play response'}
-                title={speaker.msgId === msg._id && !speaker.paused ? 'Pause playback' : 'Play response aloud'}
+                aria-label={speaker.msgId === msg._id && speaker.state === 'playing' ? 'Stop playback' : 'Play response'}
+                title={speaker.msgId === msg._id && speaker.state === 'playing' ? 'Stop playback' : 'Play response aloud'}
               >
-                {speaker.loadingFor === msg._id ? (
-                  <Loader2 size={13} className="spin" />
-                ) : speaker.msgId === msg._id && !speaker.paused ? (
+                {speaker.msgId === msg._id && speaker.state === 'playing' ? (
                   <Pause size={13} />
                 ) : (
                   <Volume2 size={13} />
                 )}
-                {speaker.msgId === msg._id && !speaker.paused ? 'Pause'
-                  : speaker.msgId === msg._id && speaker.paused ? 'Resume'
+                {speaker.msgId === msg._id && speaker.state === 'playing' ? 'Stop'
+                  : speaker.msgId === msg._id && speaker.state === 'stopped' ? 'Replay'
                     : 'Play'}
               </button>
             )}
@@ -409,10 +442,8 @@ const VirtualRow = memo(function VirtualRow({ msg, rowKey, offset, isLast, strea
 export default function MessageList({ messages = [], streaming, loading, onEditRequest, onRegenerateFromMessage, onEnhanceImage }) {
   const { user } = useAuth();
   const busy = loading || streaming;
-  const audioRef = useRef(null);
-  if (!audioRef.current) audioRef.current = new Audio();
-  const urlCacheRef = useRef(new Map());
   const containerRef = useRef(null);
+  const utteranceRef = useRef(null);
   const heightsRef = useRef(new Map());
   const offsetsRef = useRef([]);
   const rangeRef = useRef({ start: 0, end: INITIAL_END });
@@ -421,56 +452,78 @@ export default function MessageList({ messages = [], streaming, loading, onEditR
   const scrollRafRef = useRef(null);
   const [revision, setRevision] = useState(0);
   const [range, setRange] = useState({ start: 0, end: INITIAL_END });
-  const [speaker, setSpeaker] = useState({ msgId: null, paused: false, loadingFor: null });
+  const [speaker, setSpeaker] = useState({ msgId: null, state: 'idle', error: false });
   const { showScrollButton, scrollToBottom } = useAutoScroll(containerRef, streaming);
 
+  // Stop any active speech when the message list unmounts or a new chat loads.
   useEffect(() => {
-    const audio = audioRef.current;
-    const reset = () => setSpeaker({ msgId: null, paused: false, loadingFor: null });
-    if (audio) {
-      audio.addEventListener('ended', reset);
-      audio.addEventListener('error', reset);
-    }
     return () => {
-      if (audio) {
-        audio.removeEventListener('ended', reset);
-        audio.removeEventListener('error', reset);
-        audio.pause();
+      if (typeof window !== 'undefined' && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
       }
     };
   }, []);
 
   const toggleSpeak = useCallback((msg) => {
-    const audio = audioRef.current;
-    if (!audio || speaker.loadingFor) return;
-    if (speaker.msgId === msg._id) {
-      if (speaker.paused) {
-        audio.play().catch(() => {});
-        setSpeaker(s => ({ ...s, paused: false }));
-      } else {
-        audio.pause();
-        setSpeaker(s => ({ ...s, paused: true }));
+    if (typeof window === 'undefined' || !window.speechSynthesis) {
+      setSpeaker({ msgId: null, state: 'idle', error: true });
+      return;
+    }
+    const synth = window.speechSynthesis;
+
+    // Same message currently playing -> stop it.
+    if (speaker.msgId === msg._id && speaker.state === 'playing') {
+      synth.cancel();
+      utteranceRef.current = null;
+      setSpeaker({ msgId: msg._id, state: 'stopped', error: false });
+      return;
+    }
+
+    // Anything new (or replay) -> cancel the current utterance first so we
+    // never speak two messages at once. A short delay after cancel() keeps
+    // Chromium from silently discarding the replacement utterance.
+    synth.cancel();
+    utteranceRef.current = null;
+    setSpeaker({ msgId: msg._id, state: 'playing', error: false });
+
+    const text = stripMarkdownForSpeech(msg.content);
+    const utterance = new SpeechSynthesisUtterance(text);
+    const voice = pickTtsVoice();
+    if (voice) {
+      utterance.voice = voice;
+      utterance.lang = voice.lang || 'en-US';
+    } else {
+      utterance.lang = 'en-US';
+    }
+    utterance.rate = 1;
+    utterance.pitch = 1;
+    utterance.onstart = () => {
+      if (utteranceRef.current === utterance) {
+        setSpeaker(s => s.msgId === msg._id ? { msgId: msg._id, state: 'playing', error: false } : s);
       }
-      return;
-    }
-    audio.pause();
-    const cached = urlCacheRef.current.get(msg._id);
-    if (cached) {
-      audio.src = cached;
-      audio.play()
-        .then(() => setSpeaker({ msgId: msg._id, paused: false, loadingFor: null }))
-        .catch(() => setSpeaker({ msgId: null, paused: false, loadingFor: null }));
-      return;
-    }
-    setSpeaker({ msgId: msg._id, paused: false, loadingFor: msg._id });
-    api.speakText(stripCodeForSpeech(msg.content))
-      .then(url => {
-        urlCacheRef.current.set(msg._id, url);
-        audio.src = url;
-        setSpeaker({ msgId: msg._id, paused: false, loadingFor: null });
-        return audio.play();
-      })
-      .catch(() => setSpeaker({ msgId: null, paused: false, loadingFor: null }));
+    };
+    utterance.onend = () => {
+      if (utteranceRef.current === utterance) {
+        utteranceRef.current = null;
+        setSpeaker(s => s.msgId === msg._id ? { msgId: msg._id, state: 'stopped', error: false } : s);
+      }
+    };
+    utterance.onerror = (event) => {
+      if (event.error === 'canceled' || event.error === 'interrupted') return;
+      if (utteranceRef.current === utterance) {
+        utteranceRef.current = null;
+        setSpeaker({ msgId: msg._id, state: 'idle', error: true });
+      }
+    };
+
+    setTimeout(() => {
+      // If the user stopped in the gap, don't start now.
+      if (utteranceRef.current !== utterance) return;
+      // Ensure voices are hydrated on Chromium before speaking.
+      getVoicesHydrated();
+      utteranceRef.current = utterance;
+      synth.speak(utterance);
+    }, 60);
   }, [speaker]);
 
   const onMeasured = useCallback((key, height) => {

@@ -32,7 +32,6 @@ const throwFriendly = (message, statusCode) => {
   return err;
 };
 
-const OPENAI_IMAGES_ENDPOINT = 'https://api.openai.com/v1/images/generations';
 const OPENAI_TRANSCRIPTIONS_ENDPOINT = 'https://api.openai.com/v1/audio/transcriptions';
 const OPENAI_SPEECH_ENDPOINT = 'https://api.openai.com/v1/audio/speech';
 const REQUEST_TIMEOUT_MS = 120000;
@@ -67,53 +66,6 @@ const handleFetchError = (err) => {
   const timedOut = err?.name === 'TimeoutError' || err?.cause?.name === 'TimeoutError' || err?.message?.includes('aborted');
   console.error('[OpenAI] network error:', timedOut ? 'timeout' : (err?.cause?.message || err?.message || err));
   throw throwFriendly(timedOut ? AI_TIMEOUT_MESSAGE : AI_NETWORK_MESSAGE, timedOut ? 504 : 503);
-};
-
-// Real OpenAI Images API (https://platform.openai.com/docs/api-reference/images).
-// The key lives in backend/.env as OPENAI_API_KEY and is never exposed to the
-// frontend. Returns base64 PNG bytes so the route can persist + display it
-// without leaking any API credentials.
-export const createImage = async ({ model, prompt, size }) => {
-  const key = env.openAiApiKey;
-  if (!key) throw throwFriendly(AI_KEY_MISSING_MESSAGE, 503);
-
-  const body = { model, prompt, n: 1 };
-  if (size) body.size = size;
-
-  let res;
-  try {
-    res = await fetch(OPENAI_IMAGES_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${key}`,
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
-  } catch (err) {
-    handleFetchError(err);
-  }
-
-  const raw = await res.text().catch(() => '');
-  if (!res.ok) throw classifyHttpError(res.status, raw);
-
-  let data;
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    throw throwFriendly(AI_INVALID_RESPONSE_MESSAGE, 502);
-  }
-  const item = data?.data?.[0];
-  if (!item || typeof item.b64_json !== 'string') {
-    console.error('[OpenAI] Malformed /images/generations response:', raw.slice(0, 500));
-    throw throwFriendly(AI_INVALID_RESPONSE_MESSAGE, 502);
-  }
-  return {
-    image: item.b64_json,
-    mediaType: item.media_type || (item.b64_json.startsWith('iVBORw0KGgo') ? 'image/png' : 'image/png'),
-    revisedPrompt: item.revised_prompt || null,
-  };
 };
 
 // OpenAI Whisper (speech-to-text). Uploads multipart audio the same way the
