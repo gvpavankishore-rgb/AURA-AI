@@ -29,10 +29,12 @@ process.on('unhandledRejection', (reason) => {
 
 const app = express();
 
-// Trust a single proxy hop (Render). In development there is no proxy, so we
-// rely on the socket address - this keeps req.ip defined and the rate limiter
-// happy both locally and in production.
-app.set('trust proxy', env.nodeEnv === 'production' ? 1 : false);
+// Trust a single proxy hop behind Render (Render sets RENDER=true and routes
+// every request through its proxy, adding X-Forwarded-For). Without this,
+// express-rate-limit raises ERR_ERL_UNEXPECTED_X_FORWARDED_FOR and req.ip is
+// the proxy's address. Locally there is no proxy, so the socket address is
+// used. Exactly one hop is trusted - never blanket-trust all proxies.
+app.set('trust proxy', env.trustProxy);
 
 app.disable('x-powered-by');
 

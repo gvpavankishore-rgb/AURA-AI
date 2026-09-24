@@ -107,11 +107,25 @@ const elevenLabsApiKey = process.env.ELEVENLABS_API_KEY || '';
 const clientUrlRaw = process.env.CLIENT_URL || 'http://localhost:5173';
 const clientOrigins = clientUrlRaw.split(',').map(s => s.trim()).filter(Boolean);
 
+// Trusted proxy hops for Express (req.ip / rate limiting). Render sets
+// RENDER=true and terminates TLS in front of the Node service, adding
+// X-Forwarded-For; without trust proxy the rate limiter throws
+// ERR_ERL_UNEXPECTED_X_FORWARDED_FOR. We trust exactly ONE hop when deployed
+// (RENDER/VERCEL set, or NODE_ENV=production) and none locally. TRUST_PROXY
+// may override for unusual topologies.
+const deployedBehindProxy = process.env.RENDER === 'true'
+  || process.env.VERCEL === 'true'
+  || process.env.NODE_ENV === 'production';
+const trustProxy = process.env.TRUST_PROXY !== undefined
+  ? String(process.env.TRUST_PROXY) === 'true'
+  : deployedBehindProxy;
+
 export default {
   port: process.env.PORT || 5001,
   nodeEnv: process.env.NODE_ENV || 'development',
   clientUrl: clientUrlRaw,
   clientOrigins,
+  trustProxy,
   supabaseUrl: normalizeSupabaseUrl(process.env.SUPABASE_URL),
   supabaseAnonKey: process.env.SUPABASE_ANON_KEY || '',
   hasSupabase,

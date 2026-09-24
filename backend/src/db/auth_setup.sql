@@ -41,6 +41,13 @@ begin
   on conflict (user_id) do nothing;
 
   return new;
+exception when unique_violation then
+  -- The email is already owned by a LEGACY pre-Auth profile whose public.users
+  -- id differs from new.id (classic "users_email_key" collision). Creating a
+  -- second row here must never happen; instead leave profile creation to
+  -- public.reconcile_user_profile(), which migrates the legacy profile and its
+  -- data to new.id on the user's first authenticated request.
+  return new;
 end;
 $$;
 

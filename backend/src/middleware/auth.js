@@ -17,7 +17,9 @@ const logReconcile = (authUserId, result) => {
 // Calls the security-definer reconcile RPC (backend/src/db/migration_reconcile_user_profiles.sql).
 // Runs as the authenticated user but is executed with definer privileges, so it
 // may see/handle the invisible legacy row. It only ever reconciles the caller's
-// own identity (the SQL re-checks auth.uid()).
+// own identity (the SQL re-checks auth.uid()). Idempotent: existing profile ->
+// returns it; same-email legacy row -> migrates its data to the auth id; none ->
+// creates the canonical row.
 const reconcileProfile = async (authUser) => {
   const sb = getSupabase();
   const { data, error } = await sb.rpc('reconcile_user_profile', {
@@ -31,7 +33,8 @@ const reconcileProfile = async (authUser) => {
     p_avatar: authUser.user_metadata?.avatar_url || authUser.user_metadata?.picture || '',
   });
   if (error) {
-    console.error('[AuthDebug][reconcile] RPC failed:', error.message || error);
+    console.error(`[AuthDebug][reconcile] RPC failed for ${authUser.id}:`, error?.message || error);
+    console.error('[AuthDebug][reconcile] If reconcile_user_profile is missing, run backend/src/db/migration_reconcile_user_profiles.sql against the Supabase database (SQL editor).');
     throw new AppError('Could not reconcile your profile', 500);
   }
   logReconcile(authUser.id, data);
@@ -77,6 +80,14 @@ const ensureSettings = async (userId) => {
  * key, and no synthetic/fake profile is ever returned. If a legacy public.users
  * row holds the same email under a different id, it is reconciled server-side
  * via the security-definer RPC and its real data is preserved under the auth id.
+ *
+ * Idempotent sync sequence:
+ *   1. lookup by authenticated user id
+ *   2. if missing, safely check email (RLS-scoped)
+ *   3. reconcile (create the canonical row, or migrate the same-email legacy
+ *      row) exactly once via the RPC = declarative create, no blind insert
+ *   4. re-fetch and verify the final row's id equals authUser.id
+ *   5. only then continue (returns the real profile; never a fallback id)
  */
 const ensureProfile = async (authUser) => {
   const authId = authUser?.id;
@@ -89,34 +100,62 @@ const ensureProfile = async (authUser) => {
     'User';
   const avatar = authUser.user_metadata?.avatar_url || authUser.user_metadata?.picture || '';
 
+  // 1) Canonical lookup: the authenticated Supabase Auth user id.
   let profile = await User.findOne({ _id: authId });
   if (profile) {
     if (profile._id !== authId) throw new AppError('Profile identity mismatch', 500);
+    // Refresh harmless identity fields (name/avatar) only. Email is never
+    // touched here: ownership of the email belongs to the reconcile RPC, so a
+    // same-email legacy row can never collide.
+    if (profile.name !== name || profile.avatar !== avatar) {
+      await User.findOneAndUpdate({ _id: authId }, { name, avatar });
+    }
     await ensureSettings(authId);
+    console.log(`[AuthDebug][profile] found id=${profile._id} for authUser ${authId}`);
     return profile;
   }
+  console.log(`[AuthDebug][profile] id=${authId} -> not found`);
 
-  // No profile for the auth id (RLS keeps any same-email/lower-id legacy row
-  // invisible). Try a simple scoped create first; if the email is claimed by an
-  // invisible legacy row the create fails with a duplicate -> reconcile via the
-  // privileged RPC, which moves the legacy row's real data to the auth id.
-  try {
-    profile = await User.create({ id: authId, name, email: authUser.email || '', avatar });
-  } catch (err) {
-    if (!isDuplicateError(err)) {
-      console.error(`[Auth][profile] create failed for ${authId}:`, err?.message || err);
-      throw err;
-    }
-    console.log(`[AuthDebug][profile] legacy email conflict detected for ${authId} (${authUser.email || ''}) - reconciling`);
+  // 2) Safe email check. RLS (id = auth.uid()) means this can only see the
+  //    caller's own rows, so it is a hint that a profile exists under a
+  //    different public.users.id. It can never leak another user's profile.
+  let byEmail = null;
+  if (authUser.email) {
+    byEmail = await User.findOne({ email: authUser.email });
+    console.log(`[AuthDebug][profile] lookup by email (${authUser.email || ''}) -> ${byEmail ? 'found' : 'not found'}`);
+  }
+
+  // 3) Same-email profile under a different id: migrate it to the canonical
+  //    auth id (data-preserving), never shadow it and never duplicate it.
+  if (byEmail && byEmail._id !== authId) {
+    console.log(`[AuthDebug][profile] email maps to profile ${byEmail._id} != authUserId ${authId} - reconciling`);
     await reconcileProfile(authUser);
     profile = await User.findOne({ _id: authId });
-    if (profile && profile._id !== authId) throw new AppError('Profile identity mismatch', 500);
+  } else {
+    // No profile by id and none visible by email: create exactly once. If the
+    // create fails with a duplicate, an INVISIBLE legacy row (hidden by RLS)
+    // owns this email -> the privileged RPC migrates that row's data to the
+    // auth id and claims the email back. A non-duplicate failure propagates.
+    try {
+      profile = await User.create({ id: authId, name, email: authUser.email || '', avatar });
+      profile = (await User.findOne({ _id: authId })) || profile;
+    } catch (err) {
+      if (!isDuplicateError(err)) throw err;
+      console.log(`[AuthDebug][profile] create failed for ${authId}: ${err.message} - reconciling`);
+      await reconcileProfile(authUser);
+      profile = await User.findOne({ _id: authId });
+    }
   }
 
-  if (!profile) {
-    throw new AppError('Profile reconciliation did not produce a profile', 500);
+  // 4) Re-fetch already happened above; verify the final row. We only ever
+  //    continue when the profile's id equals authUser.id - there is no
+  //    fallback to a fake/other-id profile.
+  if (!profile || profile._id !== authId) {
+    console.error(`[AuthDebug][profile] no valid profile after sync for authUser ${authId} (read=${profile ? profile._id : 'null'})`);
+    throw new AppError('Profile reconciliation did not produce a matching profile', 500);
   }
 
+  // 5) user_settings must reference the same canonical users.id (authUser.id).
   await ensureSettings(authId);
   console.log(`[AuthDebug][profile] final profile id=${profile._id} for authUser ${authId}`);
   return profile;

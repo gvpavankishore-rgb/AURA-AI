@@ -120,8 +120,12 @@ begin
     -- 2b) Move every legitimate child row from the legacy id to the auth id.
     --     messages ride along with conversations (messages.conversation_id
     --     references conversations.id; there is no users FK on messages).
+    --     user_settings has a UNIQUE(user_id): skip the move when the auth id
+    --     already owns a settings row so the FK/unique constraint can never
+    --     reject the reconciliation.
     update public.user_settings set user_id = p_auth_user_id, updated_at = now()
-      where user_id = v_legacy.id;
+      where user_id = v_legacy.id
+        and not exists (select 1 from public.user_settings where user_id = p_auth_user_id);
     get diagnostics v_moved_settings = row_count;
 
     update public.conversations set user_id = p_auth_user_id, updated_at = now()
