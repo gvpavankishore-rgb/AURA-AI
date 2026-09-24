@@ -43,23 +43,69 @@ export default function ChatPage() {
   const chatInputRef = useRef(null);
   const chatRef = useRef(null);
   const restoredForRef = useRef(null);
+  const lastUserIdRef = useRef(null);
+  const hasHydratedRef = useRef(false);
   const loadRidRef = useRef(0);
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
 
-  const LAST_CHAT_KEY = 'aura:last-chat';
+  // Per-user "last chat" key so switching accounts never restores another
+  // user's (or a deleted) conversation id from localStorage.
+  const lastChatKey = user ? `aura:last-chat:${user.id}` : 'aura:last-chat';
 
   useEffect(() => {
     chatRef.current = chat?._id || chatId || null;
     if (user) {
       const id = chatRef.current;
-      if (id) localStorage.setItem(LAST_CHAT_KEY, id);
+      if (id) localStorage.setItem(lastChatKey, id);
     }
-  }, [chat, chatId, user, LAST_CHAT_KEY]);
+  }, [chat, chatId, user, lastChatKey]);
 
   useEffect(() => {
     if (!user) restoredForRef.current = null;
   }, [user]);
+
+  // React to the AUTHENTICATED user changing (sign out or direct account
+  // switch) while this page is mounted. Clears any current-chat state so a
+  // conversation from a previous account is never left visible, aborts an
+  // in-flight stream, and navigates to a fresh chat home where the restore
+  // effect below re-selects a valid conversation belonging to the NEW user.
+  // A plain "guest -> signed in" transition is left untouched so the existing
+  // pendingMessage/restore flow (e.g. sign in from the auth modal after typing
+  // a message) keeps working.
+  const userId = user?.id || null;
+  useEffect(() => {
+    if (!hasHydratedRef.current) {
+      hasHydratedRef.current = true;
+      lastUserIdRef.current = userId;
+      return;
+    }
+    if (lastUserIdRef.current === userId) return;
+    const wasSignedIn = Boolean(lastUserIdRef.current);
+    lastUserIdRef.current = userId;
+
+    const clearAccountState = () => {
+      generationRef.current += 1;
+      streamingRef.current = false;
+      abortControllerRef.current?.abort();
+      abortControllerRef.current = null;
+      setStreaming(false);
+      setLoading(false);
+      setHistoryLoading(false);
+      setShowAuthModal(false);
+      setChat(null);
+      setMessages([]);
+      setEditing(null);
+      restoredForRef.current = null;
+      chatRef.current = null;
+      navigate('/chat', { replace: true });
+    };
+
+    if (!userId || wasSignedIn) {
+      setPendingMessage(null);
+      clearAccountState();
+    }
+  }, [userId, navigate]);
 
   useEffect(() => {
     const onNewChat = () => {
@@ -73,13 +119,14 @@ export default function ChatPage() {
       setChat(null);
       setMessages([]);
       setEditing(null);
-      localStorage.removeItem(LAST_CHAT_KEY);
+      localStorage.removeItem(lastChatKey);
+      localStorage.removeItem('aura:last-chat');
       chatInputRef.current?.clearDraft();
       navigate('/chat', { replace: true });
     };
     window.addEventListener('aura:new-chat', onNewChat);
     return () => window.removeEventListener('aura:new-chat', onNewChat);
-  }, [navigate]);
+  }, [navigate, lastChatKey]);
 
   const loadChat = useCallback(async (id) => {
     const rid = ++loadRidRef.current;
@@ -125,7 +172,10 @@ export default function ChatPage() {
     let cancelled = false;
     (async () => {
       try {
-        const stored = localStorage.getItem(LAST_CHAT_KEY);
+        // Only restore a bookmarked chat id that belongs to THIS user (the key
+        // is scoped to the authenticated Supabase user id). A stale/deleted/other
+        // user's id is simply ignored and gets cleaned up on load failure below.
+        const stored = user ? localStorage.getItem(lastChatKey) : null;
         if (stored) {
           navigate(`/chat/${stored}`, { replace: true });
           return;
@@ -138,12 +188,12 @@ export default function ChatPage() {
           );
           navigate(`/chat/${latest._id}`, { replace: true });
         } else {
-          localStorage.removeItem(LAST_CHAT_KEY);
+          localStorage.removeItem(lastChatKey);
         }
       } catch {}
     })();
     return () => { cancelled = true; };
-  }, [user, chatId, pendingMessage, navigate, LAST_CHAT_KEY]);
+  }, [user, lastChatKey, chatId, pendingMessage, navigate]);
 
   useEffect(() => {
     if (user && pendingMessage) {
@@ -326,7 +376,7 @@ export default function ChatPage() {
         },
       }
     );
-  }, [chatRef, navigate, LAST_CHAT_KEY]);
+  }, [chatRef, navigate, lastChatKey]);
 
   const handleSend = useCallback(async ({ content, attachments, regenerate = false, mode, editMessageId }) => {
     if (streamingRef.current) return { success: false, error: 'A response is already generating. Wait for it to finish or stop it first.' };

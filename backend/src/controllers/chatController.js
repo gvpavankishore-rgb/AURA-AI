@@ -247,9 +247,17 @@ export const uploadChatFile = async (req, res, next) => {
   }
 };
 
+const assertOwnProfile = (req) => {
+  if (!req.user) throw new AppError('Authentication required', 401);
+  if (req.authUserId && req.user._id !== req.authUserId) {
+    console.error(`[Chat] identity mismatch: profile._id=${req.user._id} authUserId=${req.authUserId}`);
+    throw new AppError('Profile identity mismatch. Please sign in again.', 500);
+  }
+};
+
 export const sendMessage = async (req, res, next) => {
   try {
-    if (!req.user) throw new AppError('Authentication required', 401);
+    assertOwnProfile(req);
     const { conversationId, content, attachments, mode } = req.body;
     if (!content && (!attachments || attachments.length === 0)) {
       throw new AppError('Message content or attachments required', 400);
@@ -365,7 +373,7 @@ export const sendMessage = async (req, res, next) => {
 
 export const streamMessage = async (req, res, next) => {
   try {
-    if (!req.user) throw new AppError('Authentication required', 401);
+    assertOwnProfile(req);
     const { conversationId, content, attachments, regenerate, editMessageId, mode } = req.body;
 
     let chat;

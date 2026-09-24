@@ -144,11 +144,31 @@ export function AuthProvider({ children }) {
         },
       });
       if (error) return { success: false, message: friendlyAuthError(error) };
-      if (data.user && data.user.identities && data.user.identities.length === 0) {
+
+      // A brand-new account ALWAYS receives a real email identity. An empty
+      // identities array means the email was already registered, so the account
+      // is not new — ask the user to sign in instead of treating this as a
+      // successful signup.
+      if (data?.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
         return { success: false, message: 'This email is already registered. Please sign in instead.' };
       }
-      if (data.session) await syncProfile(data.session);
-      return { success: true, needsEmailConfirmation: !data.session };
+
+      if (!data?.user) {
+        return { success: false, message: friendlyAuthError({ message: 'Sign up did not complete. Please try again.' }) };
+      }
+
+      // With "Confirm email" enabled, signUp() returns a user with NO session.
+      // The account is NOT authenticated until the user clicks the confirmation
+      // link, so we do NOT create user state, do NOT navigate to the chat, and
+      // do NOT write any fake auth state. The sign-up form shows the
+      // "Confirm your email" screen instead. Authentication only happens when a
+      // real Supabase session exists (email confirmed and signed in).
+      if (data.session) {
+        await syncProfile(data.session);
+        return { success: true, needsEmailConfirmation: false };
+      }
+
+      return { success: true, needsEmailConfirmation: true };
     } catch (err) {
       return { success: false, message: friendlyAuthError(err) };
     } finally {

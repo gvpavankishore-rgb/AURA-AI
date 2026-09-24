@@ -1,37 +1,61 @@
 import { supabase } from '../lib/supabase';
 
-// API base URL.
+// ---------------------------------------------------------------------------
+// Centralized backend API base URL.
 //
-// - Production (Render static site): set VITE_API_URL to the deployed backend
-//   origin (e.g. https://aura-ai-backend-tpe2.onrender.com). Because VITE_*
-//   variables are baked in at BUILD time, the already-deployed bundle does NOT
-//   pick this up until the frontend is rebuilt and redeployed.
-// - Local development: set VITE_API_URL=http://localhost:5001, OR leave it
-//   blank to fall back to the relative '/api' used by the Vite dev proxy
-//   (frontend/vite.config.js proxies /api -> localhost:5001). Production must
-//   never rely on that proxy, so the fallback '/api' must NOT be used when the
-//   backend is deployed on a separate origin.
+// This is the single source of truth for EVERY backend request the frontend
+// makes: /api/chat/stream, /api/chats, /api/users/me, message/regenerate/edit,
+// image & document upload, voice, translate, memory, settings, etc. All of
+// them go through `BASE` below — never hardcode a backend URL anywhere else.
 //
-// The variable holds the backend ORIGIN (no trailing slash, no '/api' segment).
-// '/api' is appended here. If someone instead configures VITE_API_URL to end
-// with '/api', it is kept as-is so we never produce a doubled
+// Resolution order:
+//   1. VITE_API_URL (baked into the bundle at BUILD time). On Render set it to
+//      the PUBLIC backend origin, e.g.
+//      https://aura-ai-backend-tpe2.onrender.com
+//   2. Development fallback -> http://localhost:5001 so `npm run dev` keeps
+//      talking to the local backend with zero extra configuration.
+//   3. Production fallback -> the documented Render backend origin from this
+//      project's deployment configuration. A local/loopback URL is NEVER used
+//      as a production default.
+//
+// Extra safety: on production builds, a VITE_API_URL that points at
+// localhost/127.0.0.1 is STRIPPED and replaced by the production URL, so the
+// deployed bundle can never fail with net::ERR_CONNECTION_REFUSED because
+// someone baked http://localhost:5001 into the build.
+// ---------------------------------------------------------------------------
+const PROD_API_BASE_URL = 'https://aura-ai-backend-tpe2.onrender.com';
+
+const isLocalApiUrl = (url) =>
+  /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(String(url || '').trim().replace(/\/+$/, ''));
+
+const configuredApiUrl = (() => {
+  const value = String(import.meta.env.VITE_API_URL || '').trim().replace(/\/+$/, '');
+  if (!value) return '';
+  if (!import.meta.env.DEV && isLocalApiUrl(value)) return '';
+  return value;
+})();
+
+const apiBaseUrl = configuredApiUrl || (import.meta.env.DEV ? 'http://localhost:5001' : PROD_API_BASE_URL);
+
+// BASE holds the backend ORIGIN plus "/api". If VITE_API_URL is configured to
+// already end with "/api" it is kept as-is so we never produce a doubled
 // "…/api/api/…" or reversed "…//api" path.
-const rawApiUrl = (import.meta.env.VITE_API_URL || '').trim().replace(/\/+$/, '');
-const BASE = rawApiUrl.endsWith('/api')
-  ? rawApiUrl
-  : (rawApiUrl ? `${rawApiUrl}/api` : '/api');
+const BASE = apiBaseUrl.endsWith('/api') ? apiBaseUrl : `${apiBaseUrl}/api`;
 
 // Resolve a backend-served upload path. `path` is the stored filename (e.g.
-// "uuid.png" or "subdir/uuid.png"). Always returned as a same-origin relative
-// URL that the Vite dev proxy (/uploads -> localhost:5001) resolves locally,
-// and that production hosting maps to the backend. Using the backend origin
-// here (e.g. localhost:5001) would be cross-origin from the frontend origin
-// (localhost:5173) and browsers block the image request with
-// ERR_BLOCKED_BY_RESPONSE.NotSameOrigin after a refresh.
+// "uuid.png" or "subdir/uuid.png").
+// - Development: returns a same-origin relative URL resolved by the Vite dev
+//   proxy (/uploads -> localhost:5001), which avoids cross-origin image
+//   blocking on localhost.
+// - Production: returns the backend origin (the same centralized base) so
+//   uploaded images/documents keep working on the Render static site even
+//   though it lives on a different origin than the backend.
 export const uploadUrl = (path) => {
   if (!path) return '';
   const filename = String(path).split(/[\\/]/).pop();
-  return `/uploads/${filename}`;
+  if (!filename) return '';
+  const origin = import.meta.env.DEV ? '' : apiBaseUrl;
+  return `${origin}/uploads/${filename}`;
 };
 
 const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp)$/i;

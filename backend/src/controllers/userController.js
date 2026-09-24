@@ -9,7 +9,10 @@ import fs from 'fs';
 
 export const getMe = async (req, res, next) => {
   try {
-    const settings = await UserSettings.findOne({ user: req.user._id });
+    let settings = await UserSettings.findOne({ user: req.user._id });
+    if (!settings) {
+      settings = await UserSettings.create({ user: req.user._id });
+    }
     success(res, { user: req.user, settings });
   } catch (err) {
     next(err);
