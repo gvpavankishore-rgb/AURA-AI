@@ -191,7 +191,7 @@ export default function Sidebar({ open, onClose }) {
     }
     lastQueryRef.current = searchRef.current;
     fetchChats({ reset: true });
-  }, [user, location.pathname, fetchChats]);
+  }, [user, fetchChats]);
 
   useEffect(() => {
     if (!user) return;
@@ -205,9 +205,16 @@ export default function Sidebar({ open, onClose }) {
 
   useEffect(() => {
     if (!user) return;
-    const onHistoryUpdated = () => fetchChats({ reset: true });
+    let timer = null;
+    const onHistoryUpdated = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => fetchChats({ reset: true }), 300);
+    };
     window.addEventListener('aura:history-updated', onHistoryUpdated);
-    return () => window.removeEventListener('aura:history-updated', onHistoryUpdated);
+    return () => {
+      window.removeEventListener('aura:history-updated', onHistoryUpdated);
+      if (timer) clearTimeout(timer);
+    };
   }, [user, fetchChats]);
 
   const handleChatsScroll = useCallback(() => {

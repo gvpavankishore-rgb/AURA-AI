@@ -385,6 +385,7 @@ export const streamMessage = async (req, res, next) => {
     let triggerAttachments = attachments || [];
 
     let isEdit = false;
+    let userMessageId = null;
     if (editMessageId) {
       const targetMsg = await Message.findOne({ _id: editMessageId, conversation: chat._id, role: 'user' });
       if (!targetMsg) throw new AppError('Message not found to edit', 404);
@@ -394,6 +395,7 @@ export const streamMessage = async (req, res, next) => {
       await targetMsg.save();
       await Message.deleteMany({ conversation: chat._id, createdAt: { $gt: targetMsg.createdAt } });
       isEdit = true;
+      userMessageId = targetMsg._id;
     }
 
     if (regenerate || isEdit) {
@@ -405,16 +407,18 @@ export const streamMessage = async (req, res, next) => {
       if (!lastUserMsg) throw new AppError('No message to regenerate', 400);
       triggerContent = lastUserMsg.content || '';
       triggerAttachments = lastUserMsg.attachments || [];
+      if (!userMessageId) userMessageId = lastUserMsg._id;
     } else {
       const hasPayload = triggerContent || triggerAttachments.length > 0;
       if (!hasPayload) throw new AppError('Message content or attachments required', 400);
       triggerAttachments = await hydrateDocText(triggerAttachments);
-      await Message.create({
+      const createdUserMsg = await Message.create({
         conversation: chat._id,
         role: 'user',
         content: triggerContent,
         attachments: triggerAttachments,
       });
+      userMessageId = createdUserMsg._id;
     }
 
     const developerQuery = isDeveloperQuery(triggerContent);
@@ -435,7 +439,7 @@ export const streamMessage = async (req, res, next) => {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
 
-    res.write(`data: ${JSON.stringify({ chatId: chat._id.toString(), title: chat.title })}\n\n`);
+    res.write(`data: ${JSON.stringify({ chatId: chat._id.toString(), title: chat.title, ...(userMessageId ? { userMessageId } : {}) })}\n\n`);
 
     if (developerQuery) {
       res.write(`data: ${JSON.stringify({ type: 'developer_profile' })}\n\n`);

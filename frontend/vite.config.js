@@ -16,19 +16,23 @@ export default defineConfig(({ mode }) => {
         '/api': {
           target: backend,
           changeOrigin: true,
+          secure: false,
         },
         '/uploads': {
           target: backend,
           changeOrigin: true,
+          secure: false,
         },
       },
     },
     build: {
       rollupOptions: {
         output: {
-          manualChunks: {
-            vendor: ['react', 'react-dom', 'react-router-dom'],
-            markdown: ['react-markdown', 'remark-gfm', 'react-syntax-highlighter'],
+          manualChunks(id) {
+            if (id.includes('node_modules')) {
+              if (/[\\/](react|react-dom|react-router|react-router-dom)(?:[\\/]|$)/.test(id)) return 'vendor';
+            }
+            return undefined;
           },
         },
       },

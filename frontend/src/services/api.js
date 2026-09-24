@@ -20,17 +20,40 @@ const rawApiUrl = (import.meta.env.VITE_API_URL || '').trim().replace(/\/+$/, ''
 const BASE = rawApiUrl.endsWith('/api')
   ? rawApiUrl
   : (rawApiUrl ? `${rawApiUrl}/api` : '/api');
-const ORIGIN = rawApiUrl ? rawApiUrl.replace(/\/api$/, '') : '';
 
 // Resolve a backend-served upload path. `path` is the stored filename (e.g.
-// "uuid.png" or "subdir/uuid.png"). In production the backend is a different
-// origin, so the URL must be absolutized here; locally it stays relative and
-// the Vite dev proxy (/uploads -> localhost:5001) handles it.
+// "uuid.png" or "subdir/uuid.png"). Always returned as a same-origin relative
+// URL that the Vite dev proxy (/uploads -> localhost:5001) resolves locally,
+// and that production hosting maps to the backend. Using the backend origin
+// here (e.g. localhost:5001) would be cross-origin from the frontend origin
+// (localhost:5173) and browsers block the image request with
+// ERR_BLOCKED_BY_RESPONSE.NotSameOrigin after a refresh.
 export const uploadUrl = (path) => {
   if (!path) return '';
   const filename = String(path).split(/[\\/]/).pop();
-  return ORIGIN ? `${ORIGIN}/uploads/${filename}` : `/uploads/${filename}`;
+  return `/uploads/${filename}`;
 };
+
+const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp)$/i;
+
+// Resolve the display URL for a message attachment. Local blob previews win
+// (shown immediately in the optimistic bubble); anything already uploaded uses
+// uploadUrl() so it resolves correctly in dev and production alike.
+export const attachmentUrl = (att) => {
+  if (!att) return '';
+  if (att.preview) return att.preview;
+  if (att.path) return uploadUrl(att.path);
+  return '';
+};
+
+export const isImageAttachment = (att) =>
+  !!att &&
+  (att.type === 'image' ||
+    /^image\//.test(att.type || '') ||
+    (att.mimetype && /^image\//.test(att.mimetype)) ||
+    IMAGE_EXT_RE.test(att.path || '') ||
+    IMAGE_EXT_RE.test(att.filename || '') ||
+    IMAGE_EXT_RE.test(att.name || ''));
 
 const FALLBACK_ERROR = 'Something went wrong. Please try again.';
 export const NETWORK_ERROR_MESSAGE = 'Network error. Please check your connection and try again.';
@@ -72,6 +95,37 @@ class ApiService {
     this.token = token || null;
   }
 
+  // Always pull the CURRENT Supabase session before a request instead of
+  // trusting a possibly-stale cached token. Returns the access token or null
+  // when there is no (recoverable) session.
+  async resolveToken() {
+    let session = null;
+    try {
+      const { data } = await supabase.auth.getSession();
+      session = data?.session || null;
+    } catch {
+      session = null;
+    }
+
+    console.log(`[AuthDebug] session exists: ${Boolean(session)}, token length: ${session?.access_token?.length || 0}`);
+
+    if (session && typeof session.expires_at === 'number') {
+      const skewMs = 30000; // refresh ~30s before the JWT actually expires
+      if (session.expires_at * 1000 - skewMs <= Date.now()) {
+        console.log('[AuthDebug] token expired or near expiry - refreshing session');
+        try {
+          const { data: refreshed } = await supabase.auth.refreshSession();
+          session = refreshed?.session || null;
+        } catch {
+          session = null;
+        }
+      }
+    }
+
+    this.token = session?.access_token || null;
+    return this.token;
+  }
+
   async request(endpoint, options = {}) {
     const {
       method = 'GET',
@@ -85,6 +139,11 @@ class ApiService {
 
     if (signal && signal.aborted) {
       return { success: false, message: 'Request cancelled.' };
+    }
+
+    const token = await this.resolveToken();
+    if (!token) {
+      return { success: false, status: 401, message: 'Your session has expired. Please sign in again.' };
     }
 
     const buildConfig = (controller) => {
@@ -220,10 +279,16 @@ class ApiService {
       signal: watchdog.signal,
     });
 
+    let accessToken = null;
+    try {
+      accessToken = await this.resolveToken();
+    } catch {}
+    if (!accessToken) return finish(onError, 'Your session has expired. Please sign in again.');
+
     let res;
     armStall(STREAM_CONNECT_TIMEOUT_MS);
     try {
-      res = await doFetch(this.token);
+      res = await doFetch(accessToken);
     } catch (err) {
       clearStall();
       if (isCallerAborted()) return finish(onAbort);

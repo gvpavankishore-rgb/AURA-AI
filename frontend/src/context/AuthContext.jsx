@@ -61,13 +61,22 @@ export function AuthProvider({ children }) {
   const registerInFlight = useRef(false);
   const googleInFlight = useRef(false);
 
+  const lastSyncedToken = useRef(null);
+
   const syncProfile = useCallback(async (session) => {
+    const token = session?.access_token || null;
+    console.log(`[AuthDebug] syncProfile - session exists: ${Boolean(session?.user)}, token length: ${token?.length || 0}`);
+    if (lastSyncedToken.current === token) return;
+    lastSyncedToken.current = token;
+
     if (!session?.user) {
       api.setAccessToken(null);
       setUser(null);
       return;
     }
     api.setAccessToken(session.access_token);
+    const baseUser = toAppUser(session.user, null);
+    setUser(baseUser);
     let profile = null;
     try {
       const res = await api.getProfile();
@@ -83,10 +92,15 @@ export function AuthProvider({ children }) {
 
     let mounted = true;
     (async () => {
-      const { data } = await supabase.auth.getSession();
-      if (!mounted) return;
-      await syncProfile(data.session);
-      setLoading(false);
+      try {
+        const { data } = await supabase.auth.getSession();
+        if (!mounted) return;
+        setLoading(false);
+        await syncProfile(data.session);
+      } catch {
+        if (!mounted) return;
+        setLoading(false);
+      }
     })();
 
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {

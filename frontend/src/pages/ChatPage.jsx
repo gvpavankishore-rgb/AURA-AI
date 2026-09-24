@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate, useOutletContext } from 'react-router-dom';
 import { Menu, Square, RefreshCw, RotateCcw, Sparkles } from 'lucide-react';
-import api, { uploadUrl } from '../services/api';
+import api, { attachmentUrl } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import MessageList from '../components/MessageList';
 import ChatInput from '../components/ChatInput';
@@ -17,7 +17,10 @@ const suggestions = [
   { text: 'Debug my JavaScript code', icon: '🔧' },
 ];
 
-const attachmentUrl = (att) => att?.preview || (att?.path ? uploadUrl(att.path) : '');
+const storedAttachment = (a) =>
+  a && (a.id || a.path)
+    ? { id: a.id, filename: a.filename, path: a.path, mimetype: a.mimetype, type: a.type }
+    : null;
 
 export default function ChatPage() {
   const { chatId } = useParams();
@@ -31,6 +34,8 @@ export default function ChatPage() {
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [pendingMessage, setPendingMessage] = useState(null);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [followToken, setFollowToken] = useState(0);
   const abortRef = useRef(false);
   const abortControllerRef = useRef(null);
   const streamingRef = useRef(false);
@@ -67,6 +72,7 @@ export default function ChatPage() {
       chatRef.current = null;
       setChat(null);
       setMessages([]);
+      setEditing(null);
       localStorage.removeItem(LAST_CHAT_KEY);
       chatInputRef.current?.clearDraft();
       navigate('/chat', { replace: true });
@@ -84,6 +90,7 @@ export default function ChatPage() {
       if (res.success) {
         setChat(res.data.chat);
         setMessages(res.data.messages || []);
+        setFollowToken(t => t + 1);
       } else {
         navigate('/chat');
       }
@@ -100,10 +107,14 @@ export default function ChatPage() {
       loadRidRef.current += 1;
       setMessages([]);
       setChat(null);
+      setEditing(null);
       setHistoryLoading(false);
       return;
     }
     if (streamingRef.current) return;
+    setMessages([]);
+    setChat(null);
+    setEditing(null);
     loadChat(chatId);
   }, [chatId, loadChat]);
 
@@ -114,14 +125,14 @@ export default function ChatPage() {
     let cancelled = false;
     (async () => {
       try {
+        const stored = localStorage.getItem(LAST_CHAT_KEY);
+        if (stored) {
+          navigate(`/chat/${stored}`, { replace: true });
+          return;
+        }
         const res = await api.getChats();
         if (cancelled) return;
         if (res.success && res.data && res.data.length > 0) {
-          const stored = localStorage.getItem(LAST_CHAT_KEY);
-          if (stored && res.data.some(c => c._id === stored)) {
-            navigate(`/chat/${stored}`, { replace: true });
-            return;
-          }
           const latest = res.data.reduce((a, b) =>
             new Date(b.updatedAt || b.createdAt || 0).getTime() > new Date(a.updatedAt || a.createdAt || 0).getTime() ? b : a
           );
@@ -198,6 +209,18 @@ export default function ChatPage() {
               chatRef.current = meta.chatId;
               navigate(`/chat/${meta.chatId}`, { replace: true });
             }
+          }
+          if (meta.userMessageId) {
+            setMessages(prev => {
+              const updated = [...prev];
+              for (let i = updated.length - 1; i >= 0; i--) {
+                if (updated[i].role === 'user' && (updated[i]._id === 'streaming-user' || !/^[0-9a-fA-F]{24}$/.test(String(updated[i]._id)))) {
+                  updated[i] = { ...updated[i], _id: meta.userMessageId };
+                  break;
+                }
+              }
+              return updated;
+            });
           }
         },
         onDeveloper: () => {
@@ -305,8 +328,10 @@ export default function ChatPage() {
     );
   }, [chatRef, navigate, LAST_CHAT_KEY]);
 
-  const handleSend = useCallback(async ({ content, attachments, regenerate = false, mode }) => {
-    const hasInput = Boolean(content && content.trim()) || Boolean(attachments && attachments.length > 0);
+  const handleSend = useCallback(async ({ content, attachments, regenerate = false, mode, editMessageId }) => {
+    if (streamingRef.current) return { success: false, error: 'A response is already generating. Wait for it to finish or stop it first.' };
+
+    const hasInput = Boolean(content && content.trim()) || Boolean(attachments && attachments.length > 0) || Boolean(editMessageId);
     if (!hasInput) return { success: false };
 
     if (!user) {
@@ -317,19 +342,28 @@ export default function ChatPage() {
 
     let finalContent = content || '';
     let finalAttachments = [];
+    let failedIndexes = [];
 
     if (regenerate) {
       const lastUserMsg = [...messagesRef.current].reverse().find(m => m.role === 'user');
       if (!lastUserMsg) return { success: false };
       finalContent = lastUserMsg.content || '';
       finalAttachments = (Array.isArray(lastUserMsg.attachments) ? lastUserMsg.attachments : [])
-        .filter(a => a.id || a.path)
-        .map(a => ({ id: a.id, filename: a.filename, path: a.path, mimetype: a.mimetype, type: a.type }));
+        .map(storedAttachment)
+        .filter(Boolean);
       if (!finalContent.trim() && finalAttachments.length === 0) return { success: false };
-    } else if (attachments && attachments.length > 0) {
-      const docsAndImages = attachments.filter(a => !a.isVoice);
-      const voiceNotes = attachments.filter(a => a.isVoice);
-      const failedIndexes = [];
+    } else {
+      const docsAndImages = (attachments || []).filter(a => !a.isVoice);
+      const voiceNotes = (attachments || []).filter(a => a.isVoice);
+
+      if (editMessageId) {
+        const target = messagesRef.current.find(m => m._id === editMessageId && m.role === 'user');
+        if (target) {
+          finalAttachments = (Array.isArray(target.attachments) ? target.attachments : [])
+            .map(storedAttachment)
+            .filter(Boolean);
+        }
+      }
 
       for (const voice of voiceNotes) {
         try {
@@ -343,15 +377,15 @@ export default function ChatPage() {
       for (const att of docsAndImages) {
         try {
           const up = await api.uploadChatFile(att.file);
-          if (up.success && up.data) finalAttachments.push(up.data);
-          else failedIndexes.push(attachments.indexOf(att));
+          if (up.success && up.data) finalAttachments.push({ ...up.data, preview: att.preview });
+          else failedIndexes.push((attachments || []).indexOf(att));
         } catch {
-          failedIndexes.push(attachments.indexOf(att));
+          failedIndexes.push((attachments || []).indexOf(att));
         }
       }
 
       const validVox = voiceNotes.length > 0 && finalContent.trim().length > 0;
-      if (!finalContent.trim() && finalAttachments.length === 0 && !validVox) {
+      if (!editMessageId && !finalContent.trim() && finalAttachments.length === 0 && !validVox) {
         setMessages(prev => [...prev, {
           _id: 'error-' + Date.now(),
           role: 'assistant',
@@ -363,12 +397,41 @@ export default function ChatPage() {
       }
     }
 
+    if (editMessageId) {
+      const idx = messagesRef.current.findIndex(m => m._id === editMessageId && m.role === 'user');
+      if (idx === -1) return { success: false };
+      if (!finalContent.trim() && finalAttachments.length === 0) {
+        setEditing(null);
+        return { success: false };
+      }
+      setMessages(prev => {
+        const updated = prev.slice(0, idx + 1);
+        updated[idx] = {
+          ...updated[idx],
+          content: finalContent,
+          attachments: finalAttachments.map(sa => ({ id: sa.id, filename: sa.filename, type: sa.type, path: sa.path, mimetype: sa.mimetype })),
+        };
+        return updated;
+      });
+      setEditing(null);
+      const payload = {
+        conversationId: chatRef.current,
+        content: finalContent,
+        attachments: finalAttachments.map(({ preview, ...rest }) => ({ ...rest })),
+        editMessageId,
+        mode,
+      };
+      runStream(payload).catch(() => {});
+      setFollowToken(t => t + 1);
+      return { success: true };
+    }
+
     if (!regenerate) {
       const tempUserMsg = {
-        _id: Date.now().toString(),
+        _id: 'streaming-user',
         role: 'user',
         content: finalContent,
-        attachments: finalAttachments.map(a => ({ id: a.id, filename: a.filename, type: a.type, path: a.path, mimetype: a.mimetype })),
+        attachments: finalAttachments.map(a => ({ id: a.id, filename: a.filename, type: a.type, path: a.path, mimetype: a.mimetype, preview: a.preview })),
         createdAt: new Date().toISOString(),
       };
       setMessages(prev => [...prev, tempUserMsg]);
@@ -377,12 +440,13 @@ export default function ChatPage() {
     const payload = {
       conversationId: chatRef.current,
       content: finalContent,
-      attachments: finalAttachments,
+      attachments: finalAttachments.map(({ preview, ...rest }) => ({ ...rest })),
       regenerate,
       mode,
     };
 
     runStream(payload).catch(() => {});
+    setFollowToken(t => t + 1);
 
     return { success: true };
   }, [user, runStream]);
@@ -402,6 +466,7 @@ export default function ChatPage() {
       isEnhancing: true,
       createdAt: new Date().toISOString(),
     }]);
+    setFollowToken(t => t + 1);
     const results = [];
     try {
       for (const att of images) {
@@ -448,9 +513,16 @@ export default function ChatPage() {
   }, [loading, streaming, handleSend]);
 
   const handleEditRequest = useCallback((messageId) => {
+    if (loading || streaming || streamingRef.current) return;
     const msg = messagesRef.current.find(m => m._id === messageId && m.role === 'user');
     if (!msg) return;
-    chatInputRef.current?.setDraft(msg.content || '');
+    setEditing({ msgId: msg._id, content: msg.content || '' });
+    chatInputRef.current?.startEdit(msg.content || '');
+  }, [loading, streaming]);
+
+  const handleCancelEdit = useCallback(() => {
+    setEditing(null);
+    chatInputRef.current?.cancelEdit();
   }, []);
 
   const handleRetry = useCallback(() => {
@@ -473,8 +545,8 @@ export default function ChatPage() {
   }, []);
 
   const handleSuggestion = useCallback((text) => {
-    handleSend({ content: text });
-  }, [handleSend]);
+    chatInputRef.current?.setDraft(text);
+  }, []);
 
   const lastMessage = messages[messages.length - 1];
   const showRetry = lastMessage?.isError && !loading && !streaming;
@@ -530,6 +602,7 @@ export default function ChatPage() {
             messages={messages}
             streaming={streaming}
             loading={loading}
+            followToken={followToken}
             onEditRequest={handleEditRequest}
             onRegenerateFromMessage={handleRegenerateFromMessage}
             onEnhanceImage={handleEnhanceImage}
@@ -556,6 +629,8 @@ export default function ChatPage() {
         onSend={handleSend}
         onStop={handleStop}
         loading={loading}
+        editing={editing}
+        onCancelEdit={handleCancelEdit}
         placeholder={user ? 'Ask AURA anything...' : 'Sign in to start chatting...'}
       />
 

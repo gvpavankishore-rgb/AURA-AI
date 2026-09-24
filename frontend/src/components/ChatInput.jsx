@@ -1,8 +1,8 @@
-import { useState, useRef, useEffect, forwardRef, useImperativeHandle, lazy, Suspense } from 'react';
+import { useState, useRef, useEffect, forwardRef, useImperativeHandle, lazy, Suspense, memo } from 'react';
 import TextareaAutosize from 'react-textarea-autosize';
 import {
   Plus, Mic, Square, Image as ImageIcon, FileUp, Camera, ArrowLeftRight,
-  FileText, Languages, ArrowUp, X, AudioLines, AlertTriangle, Braces,
+  FileText, Languages, ArrowUp, X, AudioLines, AlertTriangle, Braces, Pencil,
 } from 'lucide-react';
 import SmartImage from './SmartImage';
 import { compressImage } from '../utils/image';
@@ -41,7 +41,7 @@ const DRAFT_KEY = 'aura:chat-draft';
 
 const SUPPORTED_PASTE_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp'];
 
-const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, placeholder }, ref) {
+const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, placeholder, editing, onCancelEdit }, ref) {
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState([]);
   const [recording, setRecording] = useState(false);
@@ -59,6 +59,7 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
   const [codingMode, setCodingMode] = useState(false);
   const textareaRef = useRef(null);
   const dragDepth = useRef(0);
+  const submittingRef = useRef(false);
 
   useImperativeHandle(ref, () => ({
     clearDraft: () => {
@@ -82,6 +83,17 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
       setTranslateMode(false);
       setPreviewUrl(null);
       textareaRef.current?.focus();
+    },
+    startEdit: (content) => {
+      setText(typeof content === 'string' ? content : '');
+      setTranslateMode(false);
+      setPreviewUrl(null);
+      setVoiceError('');
+      textareaRef.current?.focus();
+    },
+    cancelEdit: () => {
+      setTranslateMode(false);
+      setPreviewUrl(null);
     },
   }));
   const menuRef = useRef(null);
@@ -139,28 +151,42 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
   }, []);
 
   const hasContent = text.trim().length > 0 || attachments.length > 0;
+  const canSend = hasContent || !!editing;
   const busyAttachments = attachments.some(a => a.status === 'compressing');
 
   const handleSend = async () => {
     if (loading || transcribing || submitting || busyAttachments) return;
+    if (submittingRef.current) return;
     const trimmed = text.trim();
 
-    if (!trimmed && attachments.length === 0) return;
+    if (!trimmed && attachments.length === 0 && !editing) return;
     let content = trimmed;
     if (translateMode && trimmed) {
       const src = sourceLanguage ? translateTargets.find(l => l.code === sourceLanguage)?.name : '';
       const target = translateTargets.find(l => l.code === targetLanguage)?.name || 'Spanish';
       content = src ? `Translate from ${src} to ${target}:\n\n${trimmed}` : `Translate to ${target}:\n\n${trimmed}`;
     }
-    const payload = { content, attachments, mode: codingMode ? 'coding' : undefined };
+    const payload = {
+      content,
+      attachments,
+      mode: codingMode ? 'coding' : undefined,
+      ...(editing ? { editMessageId: editing.msgId } : {}),
+    };
+    submittingRef.current = true;
     setSubmitting(true);
     setAttachments(prev => prev.map(a => (a.status ? { ...a, status: 'uploading' } : a)));
     const result = await onSend(payload);
+    submittingRef.current = false;
     setSubmitting(false);
     if (result && result.success) {
       setText('');
       setAttachments([]);
-      releaseAllPreviewUrls();
+      previewUrlsRef.current = previewUrlsRef.current.filter((url) => {
+        const inSentImage = attachments.some((a) => a.preview === url && (a.type || a.mimetype || '').startsWith('image/'));
+        if (inSentImage) return true;
+        releasePreviewUrl(url);
+        return false;
+      });
       setMenuOpen(false);
     } else if (result && Array.isArray(result.failures) && result.failures.length > 0) {
       setAttachments(prev => prev.map((a, i) => (result.failures.includes(i) ? { ...a, status: 'error' } : a)));
@@ -447,13 +473,15 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
     ? 'Listening...'
     : loading
       ? 'Generating...'
-      : codingMode
-        ? 'Ask for code, debugging, or explanation...'
-        : translateMode
-          ? `Type text to translate to ${translateTargets.find(l => l.code === targetLanguage)?.name || 'Spanish'}...`
-          : attachments.length > 0
-          ? 'Ask about this...'
-          : (placeholder || 'Ask AURA anything...');
+      : editing
+        ? 'Edit your message...'
+        : codingMode
+          ? 'Ask for code, debugging, or explanation...'
+          : translateMode
+            ? `Type text to translate to ${translateTargets.find(l => l.code === targetLanguage)?.name || 'Spanish'}...`
+            : attachments.length > 0
+            ? 'Ask about this...'
+            : (placeholder || 'Ask AURA anything...');
 
   return (
     <div className={`input-area ${dragActive ? 'drag-active' : ''}`}
@@ -504,6 +532,16 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
             <Braces size={13} />
             Coding mode
             <button className="remove-btn" onClick={() => setCodingMode(false)} aria-label="Disable coding mode" title="Disable coding mode">
+              <X size={12} />
+            </button>
+          </div>
+        )}
+
+        {editing && (
+          <div className="composer-mode">
+            <Pencil size={13} />
+            Editing message
+            <button className="remove-btn" onClick={onCancelEdit} aria-label="Cancel editing" title="Cancel edit">
               <X size={12} />
             </button>
           </div>
@@ -629,7 +667,7 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
           />
 
           <div className="composer-controls">
-            {!loading && !recording && !hasContent && (
+            {!loading && !recording && !canSend && (
               <button
                 className="composer-round subtle"
                 onClick={toggleMic}
@@ -661,11 +699,11 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
               >
                 <Square size={16} />
               </button>
-            ) : hasContent ? (
+            ) : canSend ? (
               <button
                 className="composer-round send"
                 onClick={handleSend}
-                disabled={!hasContent || loading || submitting || busyAttachments}
+                disabled={!canSend || loading || submitting || busyAttachments}
                 aria-label="Send message"
                 title="Send message"
               >
@@ -724,4 +762,4 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
   );
 });
 
-export default ChatInput;
+export default memo(ChatInput);

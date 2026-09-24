@@ -22,7 +22,7 @@ export const updateMe = async (req, res, next) => {
     const updates = {};
     if (name) updates.name = name;
     if (avatar !== undefined) updates.avatar = avatar;
-    const user = await User.findByIdAndUpdate(req.user._id, updates, { new: true, runValidators: true });
+    const user = await User.findOneAndUpdate({ _id: req.user._id }, updates, { new: true });
     success(res, user);
   } catch (err) {
     next(err);
@@ -39,7 +39,7 @@ export const deleteAccount = async (req, res, next) => {
     await Conversation.deleteMany({ user: userId });
     await Document.deleteMany({ user: userId });
     await Memory.deleteMany({ user: userId });
-    await User.findByIdAndDelete(userId);
+    await User.findOneAndDelete({ _id: userId });
 
     success(res, null, 'Account deleted');
   } catch (err) {

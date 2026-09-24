@@ -2,10 +2,11 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 
 const NEAR_BOTTOM_THRESHOLD = 160;
 
-export default function useAutoScroll(containerRef, streaming = false) {
+export default function useAutoScroll(containerRef, { streaming = false, followToken = 0 } = {}) {
   const [showScrollButton, setShowScrollButton] = useState(false);
   const nearBottomRef = useRef(true);
   const rafRef = useRef(null);
+  const followRafRef = useRef(null);
   const showButtonRef = useRef(false);
 
   const updateButton = useCallback((show) => {
@@ -26,6 +27,7 @@ export default function useAutoScroll(containerRef, streaming = false) {
     const el = containerRef.current;
     if (!el) return;
     el.scrollTo({ top: el.scrollHeight, left: 0, behavior: smooth ? 'smooth' : 'auto' });
+    nearBottomRef.current = true;
     updateButton(false);
   }, [containerRef, updateButton]);
 
@@ -39,6 +41,27 @@ export default function useAutoScroll(containerRef, streaming = false) {
   }, [containerRef]);
 
   useLayoutEffect(updateScroll);
+
+  useEffect(() => {
+    if (!followToken) return undefined;
+    const el = containerRef.current;
+    if (!el) return undefined;
+    nearBottomRef.current = true;
+    el.scrollTop = el.scrollHeight;
+    updateButton(false);
+    if (followRafRef.current) cancelAnimationFrame(followRafRef.current);
+    followRafRef.current = requestAnimationFrame(() => {
+      followRafRef.current = null;
+      const current = containerRef.current;
+      if (current && nearBottomRef.current) current.scrollTop = current.scrollHeight;
+    });
+    return () => {
+      if (followRafRef.current) {
+        cancelAnimationFrame(followRafRef.current);
+        followRafRef.current = null;
+      }
+    };
+  }, [followToken, containerRef, updateButton]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -76,7 +99,21 @@ export default function useAutoScroll(containerRef, streaming = false) {
     return () => ro.disconnect();
   }, [containerRef]);
 
-  useEffect(() => () => cancelAnimationFrame(rafRef.current), []);
+  useEffect(() => {
+    const vv = typeof window !== 'undefined' ? window.visualViewport : null;
+    const onViewport = () => updateScroll();
+    vv?.addEventListener('resize', onViewport);
+    window.addEventListener('resize', onViewport);
+    return () => {
+      vv?.removeEventListener('resize', onViewport);
+      window.removeEventListener('resize', onViewport);
+    };
+  }, [updateScroll]);
+
+  useEffect(() => () => {
+    cancelAnimationFrame(rafRef.current);
+    if (followRafRef.current) cancelAnimationFrame(followRafRef.current);
+  }, []);
 
   return { showScrollButton, scrollToBottom };
 }

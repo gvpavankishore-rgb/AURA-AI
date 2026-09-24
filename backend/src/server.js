@@ -28,6 +28,12 @@ process.on('unhandledRejection', (reason) => {
 });
 
 const app = express();
+
+// Trust a single proxy hop (Render). In development there is no proxy, so we
+// rely on the socket address - this keeps req.ip defined and the rate limiter
+// happy both locally and in production.
+app.set('trust proxy', env.nodeEnv === 'production' ? 1 : false);
+
 app.disable('x-powered-by');
 
 // Security headers. contentSecurityPolicy is disabled because the frontend

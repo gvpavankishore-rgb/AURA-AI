@@ -1,25 +1,18 @@
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { Copy, Check, Download, FileText, Pencil, RefreshCw, CircleAlert, Volume2, Pause, Sparkles, ArrowDown } from 'lucide-react';
-import { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback, memo } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback, memo, lazy, Suspense } from 'react';
 import ChatAvatar from './ChatAvatar';
 import ActionPermissionCard from './ActionPermissionCard';
 import DeveloperProfileCard from './DeveloperProfileCard';
 import { useAuth } from '../context/AuthContext';
-import { uploadUrl } from '../services/api';
+import { attachmentUrl, isImageAttachment } from '../services/api';
 import useAutoScroll from '../hooks/useAutoScroll';
 import SmartImage from './SmartImage';
+import { createTtsSpeaker, STATE } from '../utils/ttsController';
 
-const messageUrl = (att) => {
-  if (att.preview) return att.preview;
-  if (att.path) return uploadUrl(att.path);
-  return '';
-};
+const MarkdownContent = lazy(() => import('./MarkdownContent'));
 
 const downloadAttachment = (att) => {
-  const href = messageUrl(att);
+  const href = attachmentUrl(att);
   if (!href) return;
   const a = document.createElement('a');
   a.href = href;
@@ -27,31 +20,6 @@ const downloadAttachment = (att) => {
   document.body.appendChild(a);
   a.click();
   a.remove();
-};
-
-// Convert markdown to clean text for speech. Strips code blocks, inline code,
-// emphasis/heading/list markers, markdown links, images, URLs, and collapses to
-// a single line, so speechSynthesis never reads "hash-hash-bold asterisk".
-const stripMarkdownForSpeech = (text) => {
-  let clean = String(text || '')
-    .replace(/```[\s\S]*?```/g, ' Code omitted. ')
-    .replace(/`([^`]*)`/g, '$1 ')
-    .replace(/!\[([^\]]*)\]\([^)]*\)/g, ' ')
-    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1 ')
-    .replace(/^#{1,6}\s*/gm, ' ')
-    .replace(/^\s*([-*+]|\d+[.)])\s+/gm, ' ')
-    .replace(/[*_~>|]/g, ' ')
-    .replace(/https?:\/\/\S+/gi, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  // Avoid speaking raw JSON / metadata blobs - summarize instead.
-  const stripped = clean;
-  if (stripped.startsWith('{') && stripped.includes('}') && (stripped.includes('":"') || stripped.includes("':'") || stripped.includes('":'))) {
-    clean = 'The response contains structured data. Please view it in the chat.';
-  }
-
-  return clean.slice(0, 3500);
 };
 
 const getVoicesHydrated = () => {
@@ -72,80 +40,6 @@ const pickTtsVoice = () => {
   return voices[0] || null;
 };
 
-const CodeBlock = memo(function CodeBlock({ language, children }) {
-  const [copied, setCopied] = useState(false);
-  const handleCopy = () => {
-    navigator.clipboard.writeText(children);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  const handleDownload = () => {
-    const blob = new Blob([children], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `code.${language || 'txt'}`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  return (
-    <div className="code-block">
-      <div className="code-header">
-        <span>{language || 'code'}</span>
-        <div style={{ display: 'flex', gap: 4 }}>
-          <button onClick={handleCopy}>
-            {copied ? <><Check size={11} /> Copied</> : <><Copy size={11} /> Copy</>}
-          </button>
-          <button onClick={handleDownload}>
-            <Download size={11} /> Save
-          </button>
-        </div>
-      </div>
-      <SyntaxHighlighter
-        style={oneDark}
-        language={language || 'text'}
-        PreTag="div"
-        customStyle={{ margin: 0, background: 'var(--bg-primary)', fontSize: '12.5px', overflowX: 'auto' }}
-      >
-        {children}
-      </SyntaxHighlighter>
-    </div>
-  );
-});
-
-const MarkdownContent = memo(function MarkdownContent({ content }) {
-  return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      components={{
-        code({ node, inline, className, children, ...props }) {
-          const match = /language-(\w+)/.exec(className || '');
-          if (!inline && (match || String(children).includes('\n'))) {
-            return <CodeBlock language={match?.[1]}>{String(children).replace(/\n$/, '')}</CodeBlock>;
-          }
-          return <code className={className} {...props}>{children}</code>;
-        },
-        table({ node, children, ...props }) {
-          return (
-            <div className="table-scroll">
-              <table {...props}>{children}</table>
-            </div>
-          );
-        },
-      }}
-    >
-      {content}
-    </ReactMarkdown>
-  );
-});
-
-const isImageAttachment = (a) =>
-  a.type === 'image' ||
-  /^image\//.test(a.type || '') ||
-  (a.mimetype && a.mimetype.startsWith('image/'));
-
 const sourcesForMessage = (msg) => {
   if (msg.role !== 'assistant') return [];
   if (Array.isArray(msg.sources)) return msg.sources;
@@ -159,7 +53,7 @@ const revealedContentIds = new Set();
 
 function MessageBody({ msg, isLast, streaming }) {
   const attachmentsArr = Array.isArray(msg.attachments) ? msg.attachments : [];
-  const images = attachmentsArr.filter(a => isImageAttachment(a) && messageUrl(a));
+  const images = attachmentsArr.filter(a => isImageAttachment(a) && attachmentUrl(a));
   const others = attachmentsArr.filter(a => !isImageAttachment(a));
   const sources = sourcesForMessage(msg);
   const revealContent = !!(
@@ -194,7 +88,7 @@ function MessageBody({ msg, isLast, streaming }) {
           {images.map((att, i) => (
             <div key={i} className="msg-image-wrap">
               <SmartImage
-                src={messageUrl(att)}
+                src={attachmentUrl(att)}
                 alt=""
                 className="msg-image"
                 skeletonStyle={{ borderRadius: 12 }}
@@ -212,7 +106,9 @@ function MessageBody({ msg, isLast, streaming }) {
           ))}
         </div>
       )}
-      <MarkdownContent content={msg.content} />
+      <Suspense fallback={<div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>}>
+        <MarkdownContent content={msg.content} />
+      </Suspense>
       {sources.length > 0 && (
         <div className="sources-section">
           <div className="sources-title">Sources</div>
@@ -259,7 +155,7 @@ const MessageItem = memo(function MessageItem({ msg, isLast, streaming, user, on
   const animateIn = useRef(appear).current;
   const isActionCard = msg.kind === 'action_confirmation' || msg.type === 'action_confirmation';
   const userImages = msg.role === 'user' && Array.isArray(msg.attachments)
-    ? msg.attachments.filter(a => isImageAttachment(a) && messageUrl(a))
+    ? msg.attachments.filter(a => isImageAttachment(a) && attachmentUrl(a))
     : [];
   const canSpeak = msg.role === 'assistant' && !msg.isError && Boolean(msg.content) && !msg.isEnhancing;
 
@@ -295,17 +191,15 @@ const MessageItem = memo(function MessageItem({ msg, isLast, streaming, user, on
               <button
                 onClick={() => onToggleSpeak?.(msg)}
                 disabled={busy}
-                aria-label={speaker.msgId === msg._id && speaker.state === 'playing' ? 'Stop playback' : 'Play response'}
-                title={speaker.msgId === msg._id && speaker.state === 'playing' ? 'Stop playback' : 'Play response aloud'}
+                aria-label={speaker.msgId === msg._id && speaker.state === 'playing' ? 'Pause speech' : 'Play response'}
+                title={speaker.msgId === msg._id && speaker.state === 'playing' ? 'Pause speech' : 'Play response aloud'}
               >
                 {speaker.msgId === msg._id && speaker.state === 'playing' ? (
                   <Pause size={13} />
                 ) : (
                   <Volume2 size={13} />
                 )}
-                {speaker.msgId === msg._id && speaker.state === 'playing' ? 'Stop'
-                  : speaker.msgId === msg._id && speaker.state === 'stopped' ? 'Replay'
-                    : 'Play'}
+                {speaker.msgId === msg._id && speaker.state === 'playing' ? 'Pause' : 'Play'}
               </button>
             )}
             {msg.role === 'user' && (
@@ -439,91 +333,64 @@ const VirtualRow = memo(function VirtualRow({ msg, rowKey, offset, isLast, strea
   );
 });
 
-export default function MessageList({ messages = [], streaming, loading, onEditRequest, onRegenerateFromMessage, onEnhanceImage }) {
+export default function MessageList({ messages = [], streaming, loading, onEditRequest, onRegenerateFromMessage, onEnhanceImage, followToken = 0 }) {
   const { user } = useAuth();
   const busy = loading || streaming;
   const containerRef = useRef(null);
-  const utteranceRef = useRef(null);
+  const ttsRef = useRef(null);
   const heightsRef = useRef(new Map());
   const offsetsRef = useRef([]);
   const rangeRef = useRef({ start: 0, end: INITIAL_END });
   const appearSetRef = useRef(new Set());
   const prevMsgRef = useRef(null);
   const scrollRafRef = useRef(null);
+  const revisionRafRef = useRef(null);
   const [revision, setRevision] = useState(0);
   const [range, setRange] = useState({ start: 0, end: INITIAL_END });
   const [speaker, setSpeaker] = useState({ msgId: null, state: 'idle', error: false });
-  const { showScrollButton, scrollToBottom } = useAutoScroll(containerRef, streaming);
+  const { showScrollButton, scrollToBottom } = useAutoScroll(containerRef, { streaming, followToken });
 
-  // Stop any active speech when the message list unmounts or a new chat loads.
+  // One TTS controller owns the speechSynthesis session for this message list,
+  // so Play / Pause / Resume always share the same queue, chunks, and position.
+  const setSpeakerState = useCallback((msgId, state, error) => {
+    setSpeaker({ msgId: msgId ?? null, state: state ?? 'idle', error: Boolean(error) });
+  }, []);
+
   useEffect(() => {
+    let tts = null;
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      tts = createTtsSpeaker({
+        speechSynthesis: window.speechSynthesis,
+        pickVoice: pickTtsVoice,
+        onState: setSpeakerState,
+      });
+      ttsRef.current = tts;
+    }
     return () => {
+      tts?.destroy();
+      ttsRef.current = null;
       if (typeof window !== 'undefined' && window.speechSynthesis) {
         window.speechSynthesis.cancel();
       }
     };
-  }, []);
+  }, [setSpeakerState]);
+
+  // If the message currently being read is removed (edited / regenerated), stop.
+  useEffect(() => {
+    if (!speaker.msgId) return;
+    if (messages.some(m => m._id === speaker.msgId)) return;
+    ttsRef.current?.stop();
+    setSpeaker({ msgId: null, state: 'idle', error: false });
+  }, [messages, speaker.msgId]);
 
   const toggleSpeak = useCallback((msg) => {
-    if (typeof window === 'undefined' || !window.speechSynthesis) {
+    if (typeof window === 'undefined' || !window.speechSynthesis || !ttsRef.current) {
       setSpeaker({ msgId: null, state: 'idle', error: true });
       return;
     }
-    const synth = window.speechSynthesis;
-
-    // Same message currently playing -> stop it.
-    if (speaker.msgId === msg._id && speaker.state === 'playing') {
-      synth.cancel();
-      utteranceRef.current = null;
-      setSpeaker({ msgId: msg._id, state: 'stopped', error: false });
-      return;
-    }
-
-    // Anything new (or replay) -> cancel the current utterance first so we
-    // never speak two messages at once. A short delay after cancel() keeps
-    // Chromium from silently discarding the replacement utterance.
-    synth.cancel();
-    utteranceRef.current = null;
-    setSpeaker({ msgId: msg._id, state: 'playing', error: false });
-
-    const text = stripMarkdownForSpeech(msg.content);
-    const utterance = new SpeechSynthesisUtterance(text);
-    const voice = pickTtsVoice();
-    if (voice) {
-      utterance.voice = voice;
-      utterance.lang = voice.lang || 'en-US';
-    } else {
-      utterance.lang = 'en-US';
-    }
-    utterance.rate = 1;
-    utterance.pitch = 1;
-    utterance.onstart = () => {
-      if (utteranceRef.current === utterance) {
-        setSpeaker(s => s.msgId === msg._id ? { msgId: msg._id, state: 'playing', error: false } : s);
-      }
-    };
-    utterance.onend = () => {
-      if (utteranceRef.current === utterance) {
-        utteranceRef.current = null;
-        setSpeaker(s => s.msgId === msg._id ? { msgId: msg._id, state: 'stopped', error: false } : s);
-      }
-    };
-    utterance.onerror = (event) => {
-      if (event.error === 'canceled' || event.error === 'interrupted') return;
-      if (utteranceRef.current === utterance) {
-        utteranceRef.current = null;
-        setSpeaker({ msgId: msg._id, state: 'idle', error: true });
-      }
-    };
-
-    setTimeout(() => {
-      // If the user stopped in the gap, don't start now.
-      if (utteranceRef.current !== utterance) return;
-      // Ensure voices are hydrated on Chromium before speaking.
-      getVoicesHydrated();
-      utteranceRef.current = utterance;
-      synth.speak(utterance);
-    }, 60);
+    const tts = ttsRef.current;
+    const currentState = speaker.msgId === msg._id ? speaker.state : STATE.IDLE;
+    tts.toggle(msg._id, msg.content || '', currentState);
   }, [speaker]);
 
   const onMeasured = useCallback((key, height) => {
@@ -531,7 +398,11 @@ export default function MessageList({ messages = [], streaming, loading, onEditR
     const h = Math.round(height);
     if (heightsRef.current.get(key) === h) return;
     heightsRef.current.set(key, h);
-    setRevision(r => r + 1);
+    if (revisionRafRef.current) return;
+    revisionRafRef.current = requestAnimationFrame(() => {
+      revisionRafRef.current = null;
+      setRevision(r => r + 1);
+    });
   }, []);
 
   const onConsumeAppear = useCallback((key) => {
@@ -609,6 +480,10 @@ export default function MessageList({ messages = [], streaming, loading, onEditR
   useEffect(() => () => {
     cancelAnimationFrame(scrollRafRef.current);
     scrollRafRef.current = null;
+    if (revisionRafRef.current) {
+      cancelAnimationFrame(revisionRafRef.current);
+      revisionRafRef.current = null;
+    }
   }, []);
 
   const count = messages.length;
@@ -619,6 +494,9 @@ export default function MessageList({ messages = [], streaming, loading, onEditR
 
   return (
     <div className="chat-area" ref={containerRef}>
+      {speaker.error && speaker.msgId === null && (
+        <div className="tts-notice">Text-to-speech is not supported in this browser.</div>
+      )}
       {showScrollButton && (
         <button className="scroll-to-bottom-btn" onClick={() => scrollToBottom(true)} aria-label="Scroll to latest message">
           <ArrowDown size={14} /> Scroll to bottom

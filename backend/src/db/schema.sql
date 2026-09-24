@@ -132,9 +132,12 @@ create index if not exists idx_user_settings_user
 
 -- ---------------------------------------------------------------------
 -- Row Level Security
--- Only the backend uses these tables (keys are server-side only).
--- RLS is enabled with a permissive policy for the anon role so the
--- backend's anon key can read/write all rows.
+-- The backend executes every request as the authenticated Supabase user
+-- (request-scoped per-token client; see backend/src/config/supabase.js and
+-- backend/src/middleware/auth.js), so policies below enforce row ownership
+-- with auth.uid() = owner. The anon/publishable key is NOT granted any row
+-- access: it is bundled in the frontend, so direct client-side Supabase
+-- REST queries can no longer read other users' data.
 -- ---------------------------------------------------------------------
 alter table public.users enable row level security;
 alter table public.conversations enable row level security;
@@ -144,10 +147,30 @@ alter table public.memories enable row level security;
 alter table public.refresh_tokens enable row level security;
 alter table public.user_settings enable row level security;
 
-create policy "aura_server_access_users" on public.users for all to anon using (true) with check (true);
-create policy "aura_server_access_conversations" on public.conversations for all to anon using (true) with check (true);
-create policy "aura_server_access_messages" on public.messages for all to anon using (true) with check (true);
-create policy "aura_server_access_documents" on public.documents for all to anon using (true) with check (true);
-create policy "aura_server_access_memories" on public.memories for all to anon using (true) with check (true);
-create policy "aura_server_access_refresh_tokens" on public.refresh_tokens for all to anon using (true) with check (true);
-create policy "aura_server_access_user_settings" on public.user_settings for all to anon using (true) with check (true);
+-- Remove the legacy permissive anon policies (friends of anyone).
+drop policy if exists "aura_server_access_users" on public.users;
+drop policy if exists "aura_server_access_conversations" on public.conversations;
+drop policy if exists "aura_server_access_messages" on public.messages;
+drop policy if exists "aura_server_access_documents" on public.documents;
+drop policy if exists "aura_server_access_memories" on public.memories;
+drop policy if exists "aura_server_access_refresh_tokens" on public.refresh_tokens;
+drop policy if exists "aura_server_access_user_settings" on public.user_settings;
+
+-- Ownership policies: each role-scoped query is limited to the caller's own
+-- rows. The anon role has no policies here and is therefore blocked entirely.
+create policy "aura_own_users" on public.users
+  for all to authenticated using (id = auth.uid()) with check (id = auth.uid());
+create policy "aura_own_conversations" on public.conversations
+  for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+create policy "aura_own_messages" on public.messages
+  for all to authenticated
+  using (conversation_id in (select id from public.conversations where user_id = auth.uid()))
+  with check (conversation_id in (select id from public.conversations where user_id = auth.uid()));
+create policy "aura_own_documents" on public.documents
+  for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+create policy "aura_own_memories" on public.memories
+  for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+create policy "aura_own_refresh_tokens" on public.refresh_tokens
+  for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+create policy "aura_own_user_settings" on public.user_settings
+  for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
