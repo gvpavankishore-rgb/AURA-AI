@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, createContext, useContext } from 'react';
 import { supabase } from '../lib/supabase';
+import { getAuthCallbackUrl } from '../lib/frontendUrl';
 import api from '../services/api';
 
 const AuthContext = createContext(null);
@@ -140,7 +141,7 @@ export function AuthProvider({ children }) {
         password,
         options: {
           data: { full_name: name.trim() },
-          emailRedirectTo: `${window.location.origin}/auth/callback`,
+          emailRedirectTo: getAuthCallbackUrl(),
         },
       });
       if (error) return { success: false, message: friendlyAuthError(error) };
@@ -183,7 +184,7 @@ export function AuthProvider({ children }) {
       const { data, error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
         options: {
-          redirectTo: `${window.location.origin}/auth/callback`,
+          redirectTo: getAuthCallbackUrl(),
         },
       });
       if (error) return { success: false, message: friendlyAuthError(error) };

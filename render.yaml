@@ -1,0 +1,105 @@
+# Render Blueprint for AURA AI (optional)
+#
+# NOTE: This file only takes effect if this repository is connected to Render
+# as a Blueprint (Dashboard -> New + -> Blueprint). The deployed services are
+# currently created from the Dashboard, and the static site's SPA rewrite lives
+# in the Dashboard under Settings -> Redirects/Rewrites:
+#
+#   Source: /*   Destination: /index.html   Action: Rewrite
+#
+# The equivalent rewrite is encoded in the `routes` block below so that the
+# configuration is version-controlled and reproducible. Render preserves any
+# routing rules that are not listed here, and a rewrite is only applied when no
+# real file exists at the requested path (real /assets/* files are still served
+# directly). Deep links such as /chat/<id> and /auth/callback are rewritten to
+# index.html and handled by React Router without a browser redirect.
+#
+# All envVar keys use `sync: false`, so their values stay managed in the Render
+# Dashboard (they are never stored in this file).
+#
+# If your services are already dashboard-managed, you do NOT need to adopt this
+# Blueprint - simply keep the equivalent Dashboard rewrite rule in sync.
+
+services:
+  # ---- Frontend static site -------------------------------------------------
+  - type: web
+    runtime: static
+    name: aura-ai-frontend
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    # VITE_API_URL may stay blank: the production build falls back to the
+    # deployed backend (https://aura-ai-backend-tpe2.onrender.com) automatically.
+    # Set VITE_SITE_URL in the Render Dashboard (envVars -> static site) to the
+    # deployed STATIC SITE origin (e.g. https://<your-frontend>.onrender.com),
+    # rebuild + redeploy. The app otherwise falls back to window.location.origin
+    # at runtime (always correct), so VITE_SITE_URL is optional but recommended.
+    # Localhost-only values are ignored by production builds.
+    envVars:
+      - key: VITE_API_URL
+        sync: false
+      - key: VITE_SUPABASE_URL
+        sync: false
+      - key: VITE_SUPABASE_ANON_KEY
+        sync: false
+      - key: VITE_SITE_URL
+        sync: false
+
+  # ---- Backend API web service ----------------------------------------------
+  - type: web
+    runtime: node
+    name: aura-ai-backend
+    rootDir: backend
+    buildCommand: npm ci
+    startCommand: npm start
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: JWT_REFRESH_SECRET
+        sync: false
+      - key: AI_PROVIDER
+        sync: false
+      - key: OPENROUTER_API_KEY_1
+        sync: false
+      - key: OPENROUTER_API_KEY_2
+        sync: false
+      - key: OPENROUTER_MODEL
+        sync: false
+      - key: AI_VISION_MODEL
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENROUTER_BASE_URL
+        sync: false
+      - key: OPENROUTER_SITE_URL
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: ELEVENLABS_VOICE_ID
+        sync: false
+      - key: ELEVENLABS_MODEL_ID
+        sync: false
+      - key: WEB_SEARCH_ENABLED
+        sync: false
+      - key: WEB_SEARCH_PROVIDER
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: WEATHER_PROVIDER
+        sync: false
+      - key: WEATHER_API_KEY
+        sync: false
+      - key: DEFAULT_TIMEZONE
+        sync: false
+      - key: CLIENT_URL
+        sync: false

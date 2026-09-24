@@ -12,6 +12,7 @@ import { isCodingRequest } from '../services/intentDetector.js';
 import * as webSearchService from '../services/webSearchService.js';
 import { detectWebSearchIntent } from '../services/webSearchDetector.js';
 import * as weatherService from '../services/weatherService.js';
+import { getCurrentDateTimeResponse } from '../services/dateTimeService.js';
 
 const MAX_DOC_CONTEXT = 24000;
 const CHAT_PAGE_DEFAULT_LIMIT = 50;
@@ -25,9 +26,17 @@ const ASK_LOCATION_FULL = `${ASK_LOCATION_MESSAGE} For example: "weather in Hyde
 // Web-search / live-data pipeline stage helper:
 //  - "none"   -> normal OpenRouter flow (no live info requested)
 //  - "static" -> answer without the AI (real weather, weather location prompt,
-//                search temporarily unavailable or returned no results)
+//                current date/time, or search unavailable / no results)
 //  - "search" -> perform the web search, attach sources + context for the AI
-const runWebSearchStage = async (content) => {
+const runWebSearchStage = async (content, user = null) => {
+  // Explicit current date/time questions are answered from the server clock
+  // (timezone-aware). This runs first so e.g. "current date and time" never
+  // reaches the live web search or the LLM's internal knowledge.
+  const currentTime = getCurrentDateTimeResponse(content || '', user);
+  if (currentTime) {
+    return { type: 'static', content: currentTime.content, metadata: currentTime.metadata };
+  }
+
   const intent = detectWebSearchIntent(content || '');
   if (!intent.needsSearch) return { type: 'none' };
 
@@ -318,7 +327,7 @@ export const sendMessage = async (req, res, next) => {
       return success(res, { chat, userMessage, action: actionRequest });
     }
 
-    const webStage = await runWebSearchStage(content || '');
+    const webStage = await runWebSearchStage(content || '', req.user);
 
     if (webStage.type === 'static') {
       const assistantMessage = await Message.create({
@@ -481,7 +490,7 @@ export const streamMessage = async (req, res, next) => {
       return;
     }
 
-    const webStage = await runWebSearchStage(triggerContent || '');
+    const webStage = await runWebSearchStage(triggerContent || '', req.user);
 
     if (webStage.type === 'static') {
       res.write(`data: ${JSON.stringify({ content: webStage.content })}\n\n`);

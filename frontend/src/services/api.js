@@ -42,20 +42,24 @@ const apiBaseUrl = configuredApiUrl || (import.meta.env.DEV ? 'http://localhost:
 // "…/api/api/…" or reversed "…//api" path.
 const BASE = apiBaseUrl.endsWith('/api') ? apiBaseUrl : `${apiBaseUrl}/api`;
 
-// Resolve a backend-served upload path. `path` is the stored filename (e.g.
-// "uuid.png" or "subdir/uuid.png").
+// Resolve a backend-served upload path. `path` is the stored relative path
+// (e.g. "uuid.png", "uploads/uuid.png", or a subdir like "uploads/ai/uuid.png").
 // - Development: returns a same-origin relative URL resolved by the Vite dev
 //   proxy (/uploads -> localhost:5001), which avoids cross-origin image
 //   blocking on localhost.
 // - Production: returns the backend origin (the same centralized base) so
 //   uploaded images/documents keep working on the Render static site even
 //   though it lives on a different origin than the backend.
+// Sub-directories are preserved (uploads/ai/...) so enhanced/generated images
+// resolve to their real location under the /uploads static root.
 export const uploadUrl = (path) => {
   if (!path) return '';
-  const filename = String(path).split(/[\\/]/).pop();
-  if (!filename) return '';
+  let rel = String(path).replace(/\\/g, '/').replace(/^\/+/, '');
+  rel = rel.replace(/^uploads\//, '');
+  const clean = rel.split('/').filter(Boolean).join('/');
+  if (!clean) return '';
   const origin = import.meta.env.DEV ? '' : apiBaseUrl;
-  return `${origin}/uploads/${filename}`;
+  return `${origin}/uploads/${clean}`;
 };
 
 const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp)$/i;

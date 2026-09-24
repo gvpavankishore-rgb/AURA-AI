@@ -41,6 +41,12 @@ const DRAFT_KEY = 'aura:chat-draft';
 
 const SUPPORTED_PASTE_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp'];
 
+const SUPPORTED_DROP_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif'];
+const MAX_IMAGE_SIZE = 20 * 1024 * 1024;
+const MAX_DOC_SIZE = 50 * 1024 * 1024;
+
+const isSupportedImageFile = (type) => SUPPORTED_DROP_IMAGE_TYPES.includes(String(type || '').toLowerCase());
+
 const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, placeholder, editing, onCancelEdit }, ref) {
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState([]);
@@ -57,6 +63,7 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
   const [submitting, setSubmitting] = useState(false);
   const [cameraOpen, setCameraOpen] = useState(false);
   const [codingMode, setCodingMode] = useState(false);
+  const [notice, setNotice] = useState('');
   const textareaRef = useRef(null);
   const dragDepth = useRef(0);
   const submittingRef = useRef(false);
@@ -76,6 +83,7 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
       setCameraOpen(false);
       setRecording(false);
       setVoiceError('');
+      setNotice('');
       textareaRef.current?.focus();
     },
     setDraft: (text) => {
@@ -132,6 +140,12 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
   }, [text]);
 
   useEffect(() => {
+    if (!notice) return;
+    const id = setTimeout(() => setNotice(''), 5000);
+    return () => clearTimeout(id);
+  }, [notice]);
+
+  useEffect(() => {
     const onOutside = (e) => {
       if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false);
     };
@@ -181,6 +195,7 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
     if (result && result.success) {
       setText('');
       setAttachments([]);
+      setNotice('');
       previewUrlsRef.current = previewUrlsRef.current.filter((url) => {
         const inSentImage = attachments.some((a) => a.preview === url && (a.type || a.mimetype || '').startsWith('image/'));
         if (inSentImage) return true;
@@ -203,7 +218,22 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
 
   const addAttachment = (file, kind) => {
     if (!file) return;
+    if (!file.type || !file.type.startsWith('image/')) {
+      if (file.size > MAX_DOC_SIZE) {
+        setNotice('File is too large (max 50 MB).');
+        return;
+      }
+    } else {
+      if (file.size > MAX_IMAGE_SIZE) {
+        setNotice('Image is too large (max 20 MB).');
+        return;
+      }
+    }
     const isImage = file.type.startsWith('image/');
+    if (isImage && !isSupportedImageFile(file.type)) {
+      setNotice('Unsupported image format. Use JPEG, PNG, WebP, or GIF.');
+      return;
+    }
     const id = `att-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     let preview;
     if (isImage) {
@@ -735,9 +765,11 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
                 ? 'Generating response...'
                 : busyAttachments
                   ? 'Optimizing images before sending...'
-                  : voiceError
-                    ? voiceError
-                    : 'Enter to send · Shift+Enter for new line'}
+                  : notice
+                    ? notice
+                    : voiceError
+                      ? voiceError
+                      : 'Enter to send · Shift+Enter for new line'}
         </div>
       </div>
 

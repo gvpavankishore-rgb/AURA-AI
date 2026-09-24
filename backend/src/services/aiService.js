@@ -6,6 +6,7 @@ import * as openAi from './providers/openAiProvider.js';
 import * as elevenLabs from './providers/elevenLabsProvider.js';
 import { getDeveloperContextPrompt } from './developerInfo.js';
 import { isCodingRequest, isVisionHint } from './intentDetector.js';
+import { formatNowInTimezone } from './dateTimeService.js';
 
 export const isSafeAiErrorMessage = openRouter.isSafeAiErrorMessage;
 
@@ -73,8 +74,28 @@ When answering coding requests ALWAYS include, when applicable:
 
 Support JavaScript, TypeScript, React, Node.js, Express, Python, Java, C, C++, C#, Go, Rust, PHP, Ruby, SQL, HTML, CSS, Bash, and more. Keep the code idiomatic and free of placeholder TODOs unless the user explicitly asks for stubs.`;
 
+const buildServerClockText = () => {
+  const now = new Date();
+  const defaultTz = env.defaultTimezone || 'Asia/Kolkata';
+  const parts = [];
+  try {
+    const local = formatNowInTimezone({ now, timezone: defaultTz, kind: 'both' });
+    const utc = formatNowInTimezone({ now, timezone: 'UTC', kind: 'both' });
+    if (local) parts.push(`- App timezone (${defaultTz}): ${local}`);
+    if (utc) parts.push(`- UTC: ${utc}`);
+  } catch {
+    return '';
+  }
+  if (parts.length === 0) return '';
+  return `\n\n[Current date and time — provided by the SERVER at the time of this request; always treat this as the authoritative clock. NEVER guess today's date, the day of the week, or the current time from your own knowledge.]\n${parts.join('\n')}`;
+};
+
 const getSystemPrompt = ({ mode = 'chat', memories = [], documents = [], vision = false, coding = false, webSearchText = '' } = {}) => {
-  const base = `You are AURA, a helpful, intelligent, and professional AI assistant. You provide clear, accurate, and well-structured responses. You support coding, image analysis, document analysis, translation, and general conversation.${getDeveloperContextPrompt()}`;
+  // Server-provided current date/time block. This is the authoritative clock
+  // for anything time-related; it is clearly separated from the model's own
+  // knowledge so the LLM never answers "what time/date is it?" from memory.
+  const serverClockText = buildServerClockText();
+  const base = `You are AURA, a helpful, intelligent, and professional AI assistant. You provide clear, accurate, and well-structured responses. You support coding, image analysis, document analysis, translation, and general conversation.${serverClockText}${getDeveloperContextPrompt()}`;
   const memoryContext = memories.length > 0 ? `\n\nUser preferences and context:\n${memories.join('\n')}` : '';
   const documentContext = documents.length > 0
     ? `\n\nYou have access to these documents from the conversation. Use them to answer questions about the uploaded files.\n${documents.map(d => `[Document: ${d.filename}]\n${d.text}`).join('\n\n')}`

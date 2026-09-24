@@ -10,6 +10,9 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [react()],
+    // Assets are served from the domain root on Render's static CDN, so the
+    // base must stay '/'. Changing this causes 404s for the built JS/CSS.
+    base: '/',
     server: {
       port: 5173,
       proxy: {

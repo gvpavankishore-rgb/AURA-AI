@@ -134,6 +134,9 @@ export default {
   elevenLabsApiKey,
   elevenLabsVoiceId: process.env.ELEVENLABS_VOICE_ID || '',
   elevenLabsModelId: process.env.ELEVENLABS_MODEL_ID || 'eleven_multilingual_v2',
+  // App default IANA timezone used when a user asks the current date/time
+  // without naming a place and no per-user timezone is stored.
+  defaultTimezone: process.env.DEFAULT_TIMEZONE || 'Asia/Kolkata',
   webSearch: {
     enabled: process.env.WEB_SEARCH_ENABLED === 'true',
     provider: String(process.env.WEB_SEARCH_PROVIDER || 'tavily').toLowerCase(),

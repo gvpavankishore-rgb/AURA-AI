@@ -9,6 +9,9 @@ const EXPLICIT_SEARCH_PATTERNS = [
 ];
 
 const WEATHER_PATTERNS = [
+  // Bare "Weather" (or "the weather") without any location -> ask for location
+  // deterministically instead of letting the LLM guess.
+  /\bweather\b/i,
   /\bweather\s+(report|update|today|now|in|for|at|near|of)?\b/i,
   /\btoday'?s?\s+weather\b/i,
   /\bwhat('s| is|s the| are)?\s+the\s+weather\b/i,
