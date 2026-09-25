@@ -2111,6 +2111,8 @@ input::placeholder, textarea::placeholder {
 .camera-viewport {
   position: relative;
   width: 100%;
+  max-width: 560px;
+  margin: 0 auto;
   aspect-ratio: 4 / 3;
   border-radius: 14px;
   overflow: hidden;
@@ -2121,8 +2123,16 @@ input::placeholder, textarea::placeholder {
 .camera-viewport video {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
   display: block;
+  background: #000;
+}
+
+@media (max-width: 560px) {
+  .camera-viewport {
+    max-width: none;
+    min-height: 0;
+  }
 }
 
 .camera-actions {
