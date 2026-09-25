@@ -59,7 +59,34 @@ app.use('/api/', globalLimiter);
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
+// TEMPORARY legacy static mount. All NEW uploads go to the private Supabase
+// Storage bucket (services/storageService.js) and are served via short-lived
+// signed URLs, so this directory is only used to keep PRE-EXISTING records
+// (which still store an `uploads/...` disk path) viewable during the cutover.
+//
+// CORS: `app.use(cors(...))` above only emits CORS headers for requests it
+// considers CORS requests; plain <img> loads and cross-origin fetches from the
+// static site also need them here, otherwise the browser blocks the response
+// with ERR_BLOCKED_BY_RESPONSE.NotSameOrigin. The allowed origin is the same
+// configured frontend origin list used by the API, and responses are
+// credentials-free (static files need no cookies).
+// Safe to remove once no stored attachment path still starts with `uploads/`.
+app.use(
+  '/uploads',
+  cors({
+    origin: env.clientOrigins,
+    credentials: false,
+    methods: ['GET', 'HEAD'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+  }),
+  express.static(path.join(__dirname, '..', 'uploads'), {
+    fallthrough: true,
+    setHeaders: (res) => {
+      res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    },
+  })
+);
 
 app.use('/api/users', userRoutes);
 app.use('/api/chats', chatRoutes);

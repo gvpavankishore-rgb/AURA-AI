@@ -1,33 +1,16 @@
 import multer from 'multer';
-import path from 'path';
-import fs from 'fs';
-import { v4 as uuidv4 } from 'uuid';
 import { AppError } from './errorHandler.js';
 
-// multer's diskStorage does NOT create the destination directory: it calls
-// file.writeFile(path) directly asi, so on a fresh production checkout where
-// uploads/ is gitignored (and on Render's ephemeral disk) the first upload
-// fails with ENOENT -> 500. Ensure the directory exists before every write so
-// uploads work out of the box on a clean clone, locally, and in production.
-const ensureUploadDir = (dir) => {
-  try {
-    fs.mkdirSync(dir, { recursive: true });
-  } catch (err) {
-    console.error('[Upload][mkdir] failed to create upload dir:', dir, '->', err?.message || err);
-  }
-};
+// Multer now uses MEMORY STORAGE. Uploaded bytes arrive on `req.file.buffer`
+// (never written to the backend filesystem) and every attachment is persisted
+// to the PRIVATE Supabase Storage bucket through src/services/storageService.js
+// (uploadBuffer) — which scopes every object to `user-{auth.uid()}/` and
+// returns a fresh signed URL. The old diskStorage + uploads/ directory are
+// gone: nothing in production (Render ephemeral disk, clean clones, Windows
+// local) depends on a filesystem path anymore. File type policies and size
+// limits are unchanged — this only moves where bytes live.
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const dir = 'uploads/';
-    ensureUploadDir(dir);
-    cb(null, dir);
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    cb(null, `${uuidv4()}${ext}`);
-  },
-});
+const memoryStorage = multer.memoryStorage();
 
 const allowedImageTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
 const allowedDocTypes = [
@@ -48,7 +31,7 @@ const allowedAudioTypes = [
 ];
 
 export const uploadImage = multer({
-  storage,
+  storage: memoryStorage,
   limits: { fileSize: 20 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     if (allowedImageTypes.includes(file.mimetype)) cb(null, true);
@@ -57,7 +40,7 @@ export const uploadImage = multer({
 });
 
 export const uploadDocument = multer({
-  storage,
+  storage: memoryStorage,
   limits: { fileSize: 50 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     if ([...allowedDocTypes, ...allowedCodeTypes].includes(file.mimetype)) cb(null, true);
@@ -66,7 +49,7 @@ export const uploadDocument = multer({
 });
 
 export const uploadAny = multer({
-  storage,
+  storage: memoryStorage,
   limits: { fileSize: 50 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const allAllowed = [...allowedImageTypes, ...allowedDocTypes, ...allowedCodeTypes, ...allowedAudioTypes];

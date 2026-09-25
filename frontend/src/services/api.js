@@ -64,13 +64,52 @@ export const uploadUrl = (path) => {
 
 const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp)$/i;
 
-// Resolve the display URL for a message attachment. Local blob previews win
-// (shown immediately in the optimistic bubble); anything already uploaded uses
-// uploadUrl() so it resolves correctly in dev and production alike.
+// Resolve the display URL for a message attachment.
+//
+// Attachments live in a PRIVATE Supabase Storage bucket. The backend sends a
+// freshly-minted SHORT-LIVED SIGNED URL on `att.url` on every message/document
+// payload, and that signed URL is what gets rendered. It is re-minted on every
+// fetch, which is why refresh / re-login / redeploy keep working.
+//
+// Precedence:
+//   1. att.preview -> local blob: paints the optimistic bubble instantly, before
+//      the server has replied. Never persisted.
+//   2. att.url     -> signed Supabase Storage URL. Correct for BOTH migrated
+//      and legacy rows.
+//
+// The `/uploads/...` disk fallback applies ONLY to legacy pre-migration rows
+// whose path is not a Supabase key. A migrated attachment (path `user-...`)
+// NEVER falls back to `/uploads`: that endpoint is intentionally empty after
+// the migration and on Render's ephemeral disk it 404s. Falling back there is
+// what previously produced "Image unavailable" instead of a signed URL.
 export const attachmentUrl = (att) => {
   if (!att) return '';
   if (att.preview) return att.preview;
-  if (att.path) return uploadUrl(att.path);
+  if (att.url) return att.url;
+
+  const path = String(att.path || '');
+
+  // Migrated attachment: the signed URL is missing, so surface the problem
+  // instead of silently requesting a path that cannot exist.
+  if (path.startsWith('user-')) {
+    console.warn(
+      `[attachments] migrated attachment "${path}" arrived without a signed URL. ` +
+      'The backend could not sign it — check the chat-attachments bucket and owner policies ' +
+      'in backend/src/db/storage_setup.sql. Refetch the conversation to retry.'
+    );
+    return '';
+  }
+
+  if (path.startsWith('uploads/')) {
+    console.warn(
+      `[attachments] legacy uploads/ attachment "${path}" has no signed URL. ` +
+      'Falling back to the local /uploads mount, which only works if the file still exists ' +
+      'on the server disk (ephemeral on Render). Re-upload to migrate it to Supabase Storage.'
+    );
+    return uploadUrl(path);
+  }
+
+  if (path) return uploadUrl(path);
   return '';
 };
 

@@ -1,11 +1,11 @@
 import Conversation from '../models/Conversation.js';
 import Message from '../models/Message.js';
 import Memory from '../models/Memory.js';
-import path from 'path';
 import { AppError } from '../middleware/errorHandler.js';
 import { success, created } from '../utils/response.js';
 import { processMessage, isSafeAiErrorMessage } from '../services/aiService.js';
-import { extractTextFromFile } from '../services/documentText.js';
+import { extractTextFromBuffer } from '../services/documentText.js';
+import * as storageService from '../services/storageService.js';
 import { detectAction, buildUnsupportedMessage } from '../services/actionDetector.js';
 import { isDeveloperQuery } from '../services/developerInfo.js';
 import { isCodingRequest } from '../services/intentDetector.js';
@@ -107,11 +107,44 @@ const buildDocuments = (messages) => {
   return trimmed;
 };
 
+// Attach a fresh short-lived signed URL to every stored attachment so the
+// frontend preview/lightbox/click-to-open keeps working while the bucket stays
+// private. Called right before any message payload leaves the server.
+const withSignedUrls = async (payload) => {
+  if (!payload) return payload;
+  if (Array.isArray(payload)) return Promise.all(payload.map(withSignedUrls));
+  if (typeof payload !== 'object') return payload;
+  if (Array.isArray(payload.attachments)) {
+    payload.attachments = await storageService.withSignedUrls(payload.attachments);
+  }
+  if (Array.isArray(payload.messages)) {
+    for (const msg of payload.messages) {
+      if (msg && Array.isArray(msg.attachments)) {
+        msg.attachments = await storageService.withSignedUrls(msg.attachments);
+      }
+    }
+  }
+  if (payload.userMessage && Array.isArray(payload.userMessage.attachments)) {
+    payload.userMessage.attachments = await storageService.withSignedUrls(payload.userMessage.attachments);
+  }
+  return payload;
+};
+
 const hydrateDocText = async (attachments) => {
   for (const att of (attachments || []).filter(Boolean)) {
     if (att.type !== 'document' || !att.path || att.text) continue;
     try {
-      const text = await extractTextFromFile(path.resolve(process.cwd(), att.path), att.filename);
+      // Text extraction needs the raw bytes: pull them from Supabase Storage
+      // for new objects, fall back to disk only for legacy `uploads/...` rows.
+      let buffer;
+      if (String(att.path).startsWith('user-')) {
+        buffer = await storageService.downloadBuffer(att.path);
+      } else {
+        const path = await import('path');
+        const fs = await import('fs');
+        buffer = fs.readFileSync(path.resolve(process.cwd(), att.path));
+      }
+      const text = await extractTextFromBuffer(buffer, att.filename);
       att.text = text.slice(0, 60000);
     } catch {
       att.text = '';
@@ -233,6 +266,9 @@ export const getChat = async (req, res, next) => {
     const chat = await Conversation.findOne({ _id: req.params.id, user: req.user._id });
     if (!chat) throw new AppError('Chat not found', 404);
     const messages = await Message.find({ conversation: chat._id }).sort({ createdAt: 1 });
+    // Re-issue signed URLs on every read so previews survive page refresh,
+    // re-login and Render redeploys (signed URLs are short-lived by design).
+    await withSignedUrls(messages);
     success(res, { chat, messages });
   } catch (err) {
     next(err);
@@ -276,15 +312,29 @@ export const deleteChat = async (req, res, next) => {
 export const uploadChatFile = async (req, res, next) => {
   try {
     if (!req.user) throw new AppError('Authentication required', 401);
-    if (!req.file) throw new AppError('No file uploaded', 400);
-    const type = req.file.mimetype.startsWith('image/') ? 'image' : 'document';
+    if (!req.file?.buffer) throw new AppError('No file uploaded', 400);
+
+    const { buffer, originalname, mimetype, size } = req.file;
+    const type = mimetype.startsWith('image/') ? 'image' : 'document';
+
+    // Persist bytes to the PRIVATE, owner-scoped Supabase Storage bucket and
+    // return the storage key + a fresh signed URL. No disk path is ever
+    // produced or exposed to the client.
+    const uploaded = await storageService.uploadBuffer({
+      authUid: req.authUserId || req.user._id?.toString(),
+      buffer,
+      contentType: mimetype,
+      filename: originalname,
+    });
+
     success(res, {
-      id: req.file.filename,
-      filename: req.file.originalname,
-      path: req.file.path,
-      mimetype: req.file.mimetype,
+      id: uploaded.path,
+      filename: originalname,
+      path: uploaded.path,
+      url: uploaded.url,
+      mimetype,
       type,
-      size: req.file.size,
+      size,
     });
   } catch (err) {
     next(err);
@@ -354,13 +404,13 @@ export const sendMessage = async (req, res, next) => {
         await setTitleIfDefault(chat, content, hydratedAttachments);
         chat.updatedAt = new Date();
         await chat.save();
-        return success(res, { chat, userMessage, assistantMessage });
+        return success(res, await withSignedUrls({ chat, userMessage, assistantMessage }));
       }
 
       await setTitleIfDefault(chat, content, hydratedAttachments);
       chat.updatedAt = new Date();
       await chat.save();
-      return success(res, { chat, userMessage, action: actionRequest });
+      return success(res, await withSignedUrls({ chat, userMessage, action: actionRequest }));
     }
 
     const webStage = await runWebSearchStage(content || '', req.user);
@@ -375,7 +425,7 @@ export const sendMessage = async (req, res, next) => {
       await setTitleIfDefault(chat, content, hydratedAttachments);
       chat.updatedAt = new Date();
       await chat.save();
-      return success(res, { chat, userMessage, assistantMessage });
+      return success(res, await withSignedUrls({ chat, userMessage, assistantMessage }));
     }
 
     const aiResponse = await processMessage({
@@ -405,6 +455,7 @@ export const sendMessage = async (req, res, next) => {
     chat.updatedAt = new Date();
     await chat.save();
 
+    await withSignedUrls(userMessage);
     success(res, {
       chat,
       userMessage,

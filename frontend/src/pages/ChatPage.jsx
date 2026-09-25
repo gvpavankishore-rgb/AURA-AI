@@ -19,7 +19,7 @@ const suggestions = [
 
 const storedAttachment = (a) =>
   a && (a.id || a.path)
-    ? { id: a.id, filename: a.filename, path: a.path, mimetype: a.mimetype, type: a.type }
+    ? { id: a.id, filename: a.filename, path: a.path, url: a.url, mimetype: a.mimetype, type: a.type }
     : null;
 
 export default function ChatPage() {
@@ -471,7 +471,7 @@ export default function ChatPage() {
         updated[idx] = {
           ...updated[idx],
           content: finalContent,
-          attachments: finalAttachments.map(sa => ({ id: sa.id, filename: sa.filename, type: sa.type, path: sa.path, mimetype: sa.mimetype })),
+          attachments: finalAttachments.map(sa => ({ id: sa.id, filename: sa.filename, type: sa.type, path: sa.path, url: sa.url, mimetype: sa.mimetype })),
         };
         return updated;
       });
@@ -493,7 +493,7 @@ export default function ChatPage() {
         _id: 'streaming-user',
         role: 'user',
         content: finalContent,
-        attachments: finalAttachments.map(a => ({ id: a.id, filename: a.filename, type: a.type, path: a.path, mimetype: a.mimetype })),
+        attachments: finalAttachments.map(a => ({ id: a.id, filename: a.filename, type: a.type, path: a.path, url: a.url, mimetype: a.mimetype })),
         createdAt: new Date().toISOString(),
       };
       setMessages(prev => [...prev, tempUserMsg]);
@@ -552,7 +552,7 @@ export default function ChatPage() {
         _id: 'enh-ai-' + enhId,
         role: 'assistant',
         content: 'Enhanced image — higher resolution, sharper detail, and improved lighting, colors, and clarity.',
-        attachments: results.map(r => ({ type: 'image', filename: '', path: r.path, mimetype: 'image/png' })),
+        attachments: results.map(r => ({ type: 'image', filename: '', path: r.path, url: r.url, mimetype: 'image/png' })),
         createdAt: new Date().toISOString(),
       };
       setMessages(prev => prev.map(m => (m._id === tmpMsgId ? assistantMsg : m)));

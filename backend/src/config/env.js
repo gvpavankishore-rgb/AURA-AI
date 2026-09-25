@@ -128,6 +128,17 @@ export default {
   trustProxy,
   supabaseUrl: normalizeSupabaseUrl(process.env.SUPABASE_URL),
   supabaseAnonKey: process.env.SUPABASE_ANON_KEY || '',
+  // Supabase Storage: the PRIVATE bucket that holds all uploaded attachments
+  // (chat images, documents, voice memos, enhanced/AI artefacts). The bucket
+  // is never public; every read goes through short-lived signed URLs issued by
+  // the backend (see services/storageService.js). The bucket + RLS/storage
+  // policies are created by the SQL in db/storage_setup.sql. `supabaseStorageBucket`
+  // is read as a plain env var here because it must be available at module load
+  // time to supabase client creation.
+  supabaseStorageBucket: String(process.env.SUPABASE_STORAGE_BUCKET || 'chat-attachments').replace(/\s+/g, '').toLowerCase() || 'chat-attachments',
+  // Seconds a signed URL stays valid. Kept short (60-900s) so a leaked link
+  // can never out-live the user's session.
+  supabaseStorageSignedUrlTtl: Number(process.env.SUPABASE_STORAGE_SIGNED_URL_TTL) || 300,
   hasSupabase,
   aiProvider,
   isOpenRouter,

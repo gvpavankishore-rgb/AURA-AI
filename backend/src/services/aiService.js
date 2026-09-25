@@ -7,6 +7,7 @@ import * as elevenLabs from './providers/elevenLabsProvider.js';
 import { getDeveloperContextPrompt } from './developerInfo.js';
 import { isCodingRequest, isVisionHint } from './intentDetector.js';
 import { formatNowInTimezone } from './dateTimeService.js';
+import * as storageService from './storageService.js';
 
 export const isSafeAiErrorMessage = openRouter.isSafeAiErrorMessage;
 
@@ -20,6 +21,12 @@ const imageMimeFromPath = (filePath) => {
   return 'image/png';
 };
 
+const normalizeImageMime = (mimetype, filePath = '') => {
+  const mime = String(mimetype || '').toLowerCase();
+  if (mime.startsWith('image/')) return mime;
+  return imageMimeFromPath(filePath);
+};
+
 export const hasImageAttachments = (attachments) =>
   (attachments || []).some(
     (att) =>
@@ -27,7 +34,7 @@ export const hasImageAttachments = (attachments) =>
       (att.type === 'image' || (att.mimetype && att.mimetype.startsWith('image/')) || /^image\/(png|jpe?g|webp)$/i.test(att.mimetype || ''))
   );
 
-const buildUserContent = (text, attachments) => {
+const buildUserContent = async (text, attachments) => {
   if (!attachments || attachments.length === 0) return text;
 
   const parts = [];
@@ -38,12 +45,20 @@ const buildUserContent = (text, attachments) => {
     const isImage = att.type === 'image' || (att.mimetype && att.mimetype.startsWith('image/'));
     if (!isImage) continue;
     try {
-      const buffer = fs.readFileSync(path.resolve(process.cwd(), att.path));
+      // Image bytes live in Supabase Storage, never on disk. Legacy rows that
+      // still hold an `uploads/...` disk path are read from disk for the
+      // transition period; everything new goes through storageService.
+      let buffer;
+      if (String(att.path).startsWith('user-')) {
+        buffer = await storageService.downloadBuffer(att.path);
+      } else {
+        buffer = fs.readFileSync(path.resolve(process.cwd(), att.path));
+      }
       const base64 = buffer.toString('base64');
-      const mime = att.mimetype || imageMimeFromPath(att.path);
+      const mime = normalizeImageMime(att.mimetype, att.path);
       parts.push({ type: 'image_url', image_url: { url: `data:${mime};base64,${base64}` } });
     } catch (err) {
-      console.error('[AI Vision] Could not read image attachment:', err.message);
+      console.error('[AI Vision] Could not read image attachment:', err?.message || err);
     }
   }
 
@@ -116,7 +131,7 @@ const getSystemPrompt = ({ mode = 'chat', memories = [], documents = [], vision 
   return base + modePrompt + visionPrompt + memoryContext + documentContext + webSearchContext;
 };
 
-const buildHistoryMessages = ({ messages, userContent, attachments }) => {
+const buildHistoryMessages = async ({ messages, userContent, attachments }) => {
   const history = (messages || []).slice(-30).map(m => ({
     role: ['assistant', 'system'].includes(m.role) ? m.role : 'user',
     content: String(m.content || ''),
@@ -127,7 +142,7 @@ const buildHistoryMessages = ({ messages, userContent, attachments }) => {
   if (attachments && attachments.length > 0 && history.length > 0) {
     const last = history[history.length - 1];
     if (last.role === 'user' && typeof last.content === 'string') {
-      last.content = buildUserContent(last.content, attachments);
+      last.content = await buildUserContent(last.content, attachments);
     }
   }
   for (const m of history) {
@@ -203,7 +218,7 @@ export const processMessage = async ({ messages, memories = [], mode = 'chat', a
     return { content: openRouter.AI_KEY_MISSING_MESSAGE, metadata: { provider: env.aiProvider, error: 'missing_api_key' } };
   }
 
-  const history = buildHistoryMessages({ messages, userContent, attachments });
+  const history = await buildHistoryMessages({ messages, userContent, attachments });
   const requestMessages = [
     { role: 'system', content: systemPrompt },
     ...history,
@@ -251,13 +266,16 @@ export const processMessage = async ({ messages, memories = [], mode = 'chat', a
   }
 };
 
-export const analyzeImage = async (imagePath, question) => {
+export const analyzeImageBuffer = async ({ imageBuffer, mimetype = '', filename = '', question }) => {
   if (!env.hasAiKey) throw new Error(openRouter.AI_KEY_MISSING_MESSAGE);
+  if (!imageBuffer || !Buffer.isBuffer(imageBuffer)) {
+    const err = new Error('Image data is missing. Please upload a valid image.');
+    err.statusCode = 400;
+    throw err;
+  }
 
-  const imageBuffer = fs.readFileSync(imagePath);
   const base64 = imageBuffer.toString('base64');
-  const ext = path.extname(imagePath).toLowerCase();
-  const mimeType = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg';
+  const mimeType = normalizeImageMime(mimetype, filename);
 
   const userQuestion = String(question || '').trim() || 'Describe this image in detail.';
   const visionPrompt = getSystemPrompt({ vision: true, coding: isCodingRequest(userQuestion) });
@@ -293,14 +311,17 @@ export const analyzeImage = async (imagePath, question) => {
   return { content };
 };
 
-export const transcribeAudio = async (audioPath) => {
+export const transcribeAudio = async (audioBuffer, audioFilename = 'recording.webm') => {
   let formData;
   try {
+    if (!audioBuffer || !Buffer.isBuffer(audioBuffer)) {
+      throw new Error('Audio data is missing');
+    }
     formData = new FormData();
-    formData.append('file', new Blob([fs.readFileSync(audioPath)]), path.basename(audioPath));
+    formData.append('file', new Blob([audioBuffer]), audioFilename || 'recording.webm');
     formData.append('model', env.aiTranscribeModel);
   } catch (err) {
-    console.error('[STT] Could not read audio file:', err?.message || err);
+    console.error('[STT] Could not read audio data:', err?.message || err);
     const rethrown = new Error('Could not read the audio file. Please upload a valid recording.');
     rethrown.statusCode = 400;
     throw rethrown;

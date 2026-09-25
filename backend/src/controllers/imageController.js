@@ -1,62 +1,37 @@
-import fs from 'fs';
-import path from 'path';
-import { v4 as uuidv4 } from 'uuid';
+import { success, created } from '../utils/response.js';
 import { AppError } from '../middleware/errorHandler.js';
-import { success } from '../utils/response.js';
-import { analyzeImage } from '../services/aiService.js';
-import { enhanceImage } from '../services/imageEnhance.js';
-import Conversation from '../models/Conversation.js';
-import Message from '../models/Message.js';
-
-const aiDir = path.resolve(process.cwd(), 'uploads', 'ai');
-
-const ensureAiDir = () => fs.mkdirSync(aiDir, { recursive: true });
-
-const persistImageMessage = async ({ user, conversationId, prompt, content, attachment }) => {
-  let chat;
-  if (conversationId) {
-    chat = await Conversation.findOne({ _id: conversationId, user: user._id });
-    if (!chat) throw new AppError('Chat not found', 404);
-  } else {
-    const title = String(prompt || '').trim().slice(0, 80) || 'New Chat';
-    chat = await Conversation.create({ user: user._id, title });
-  }
-  if (prompt && String(prompt).trim()) {
-    await Message.create({ conversation: chat._id, role: 'user', content: String(prompt) });
-  }
-  await Message.create({
-    conversation: chat._id,
-    role: 'assistant',
-    content: content || '',
-    attachments: [attachment],
-  });
-  chat.updatedAt = new Date();
-  await chat.save();
-  return chat;
-};
+import { analyzeImageBuffer } from '../services/aiService.js';
+import { enhanceImageBuffer } from '../services/imageEnhance.js';
+import * as storageService from '../services/storageService.js';
 
 export const enhance = async (req, res, next) => {
   try {
-    if (!req.file) throw new AppError('Image file is required', 400);
-    const body = req.body || {};
-    const enhanced = await enhanceImage(req.file.path);
-    let chatId = null;
-    if (req.user) {
-      const chat = await persistImageMessage({
-        user: req.user,
-        conversationId: body.conversationId,
-        prompt: '',
-        content: 'Enhanced image — higher resolution, sharper detail, and improved lighting, colors, and clarity.',
-        attachment: {
-          type: 'image',
-          filename: '',
-          path: enhanced.path,
-          mimetype: 'image/png',
-        },
-      });
-      chatId = chat._id;
-    }
-    success(res, { ...enhanced, chatId });
+    if (!req.user) throw new AppError('Authentication required', 401);
+    if (!req.file?.buffer) throw new AppError('No image uploaded', 400);
+    const { buffer, mimetype, originalname } = req.file;
+
+    // Optimize / enhance the in-memory image and upload the RESULT back to
+    // Supabase Storage (private bucket, owner-scoped) so we never persist a
+    // disk path. Uses `authUid` from the request-scoped session (the same
+    // authenticated client that created the object, so RLS always passes).
+    const enhanced = await enhanceImageBuffer({ buffer, mimetype });
+    const uploaded = await storageService.uploadBuffer({
+      authUid: req.authUserId || req.user._id?.toString(),
+      buffer: enhanced.buffer,
+      contentType: enhanced.mimetype,
+      filename: originalname || `enhanced-${Date.now()}.png`,
+      ext: (enhanced.mimetype || '').includes('png') ? 'png' : 'jpeg',
+    });
+
+    success(res, {
+      id: uploaded.path,
+      filename: `${Date.now()}-enhanced.png`,
+      path: uploaded.path,
+      url: uploaded.url,
+      mimetype: enhanced.mimetype,
+      type: 'image',
+      size: enhanced.buffer.length,
+    });
   } catch (err) {
     next(err);
   }
@@ -64,10 +39,26 @@ export const enhance = async (req, res, next) => {
 
 export const analyze = async (req, res, next) => {
   try {
-    if (!req.file) throw new AppError('Image file is required', 400);
-    const { question } = req.body;
-    const result = await analyzeImage(req.file.path, question || 'Describe this image in detail');
-    success(res, result);
+    if (!req.user) throw new AppError('Authentication required', 401);
+    if (!req.file?.buffer) throw new AppError('No image uploaded', 400);
+
+    const { buffer, mimetype, originalname } = req.file;
+
+    // The vision provider consumes raw bytes — pass the buffer straight
+    // through (no disk round-trip, no storage round-trip). `analyze` is an
+    // ephemeral, one-shot vision call: it returns the AI's text answer and
+    // does not persist the image. To attach an image to a chat conversation,
+    // use the chat upload flow (which stores it in the private bucket).
+    const result = await analyzeImageBuffer({
+      imageBuffer: buffer,
+      mimetype,
+      question: req.body?.question || undefined,
+    });
+
+    success(res, {
+      content: result.content,
+      metadata: result.metadata,
+    });
   } catch (err) {
     next(err);
   }
