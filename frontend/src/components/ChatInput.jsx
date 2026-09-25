@@ -205,6 +205,7 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
       setMenuOpen(false);
     } else if (result && Array.isArray(result.failures) && result.failures.length > 0) {
       setAttachments(prev => prev.map((a, i) => (result.failures.includes(i) ? { ...a, status: 'error' } : a)));
+      setNotice(result.message || 'Some files could not be uploaded. Please retry or remove them below.');
     }
     textareaRef.current?.focus();
   };

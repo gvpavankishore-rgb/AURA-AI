@@ -7,6 +7,7 @@ import { useAuth } from '../context/AuthContext';
 import { attachmentUrl, isImageAttachment } from '../services/api';
 import useAutoScroll from '../hooks/useAutoScroll';
 import SmartImage from './SmartImage';
+import ImageLightbox from './ImageLightbox';
 import { createTtsSpeaker, STATE } from '../utils/ttsController';
 
 const MarkdownContent = lazy(() => import('./MarkdownContent'));
@@ -51,7 +52,7 @@ const sourcesForMessage = (msg) => {
 
 const revealedContentIds = new Set();
 
-function MessageBody({ msg, isLast, streaming }) {
+function MessageBody({ msg, isLast, streaming, onImageClick }) {
   const attachmentsArr = Array.isArray(msg.attachments) ? msg.attachments : [];
   const images = attachmentsArr.filter(a => isImageAttachment(a) && attachmentUrl(a));
   const others = attachmentsArr.filter(a => !isImageAttachment(a));
@@ -93,10 +94,11 @@ function MessageBody({ msg, isLast, streaming }) {
                 className="msg-image"
                 skeletonStyle={{ borderRadius: 12 }}
                 referrerPolicy="no-referrer"
+                onClick={() => onImageClick?.(attachmentUrl(att))}
               />
               <button
                 className="msg-image-download"
-                onClick={() => downloadAttachment(att)}
+                onClick={(e) => { e.stopPropagation(); downloadAttachment(att); }}
                 aria-label="Download image"
                 title="Download image"
               >
@@ -150,7 +152,7 @@ function MessageBody({ msg, isLast, streaming }) {
   );
 }
 
-const MessageItem = memo(function MessageItem({ msg, isLast, streaming, user, onRegenerateFromMessage, onEditRequest, busy, onEnhanceImage, speaker, onToggleSpeak, appear }) {
+const MessageItem = memo(function MessageItem({ msg, isLast, streaming, user, onRegenerateFromMessage, onEditRequest, busy, onEnhanceImage, speaker, onToggleSpeak, appear, onImageClick }) {
   const [copied, setCopied] = useState(false);
   const animateIn = useRef(appear).current;
   const isActionCard = msg.kind === 'action_confirmation' || msg.type === 'action_confirmation';
@@ -174,7 +176,7 @@ const MessageItem = memo(function MessageItem({ msg, isLast, streaming, user, on
       />
       <div className="message-main">
         <div className="message-bubble">
-          <MessageBody msg={msg} isLast={isLast} streaming={streaming} />
+          <MessageBody msg={msg} isLast={isLast} streaming={streaming} onImageClick={onImageClick} />
         </div>
 
         {!isActionCard && (
@@ -294,7 +296,7 @@ function findStart(offsets, scrollTop) {
   return ans;
 }
 
-const VirtualRow = memo(function VirtualRow({ msg, rowKey, offset, isLast, streaming, user, busy, speaker, onToggleSpeak, onEditRequest, onRegenerateFromMessage, onEnhanceImage, onMeasured, appear, onConsumeAppear }) {
+const VirtualRow = memo(function VirtualRow({ msg, rowKey, offset, isLast, streaming, user, busy, speaker, onToggleSpeak, onEditRequest, onRegenerateFromMessage, onEnhanceImage, onMeasured, appear, onConsumeAppear, onImageClick }) {
   const ref = useRef(null);
 
   useLayoutEffect(() => {
@@ -328,6 +330,7 @@ const VirtualRow = memo(function VirtualRow({ msg, rowKey, offset, isLast, strea
         onRegenerateFromMessage={onRegenerateFromMessage}
         onEnhanceImage={onEnhanceImage}
         appear={appear}
+        onImageClick={onImageClick}
       />
     </div>
   );
@@ -348,6 +351,7 @@ export default function MessageList({ messages = [], streaming, loading, onEditR
   const [revision, setRevision] = useState(0);
   const [range, setRange] = useState({ start: 0, end: INITIAL_END });
   const [speaker, setSpeaker] = useState({ msgId: null, state: 'idle', error: false });
+  const [lightboxUrl, setLightboxUrl] = useState(null);
   const { showScrollButton, scrollToBottom } = useAutoScroll(containerRef, { streaming, followToken });
 
   // One TTS controller owns the speechSynthesis session for this message list,
@@ -525,11 +529,13 @@ export default function MessageList({ messages = [], streaming, loading, onEditR
                 onMeasured={onMeasured}
                 appear={appearSetRef.current.has(rowKey)}
                 onConsumeAppear={onConsumeAppear}
+                onImageClick={setLightboxUrl}
               />
             );
           })}
         </div>
       </div>
+      {lightboxUrl && <ImageLightbox url={lightboxUrl} onClose={() => setLightboxUrl(null)} />}
     </div>
   );
 }

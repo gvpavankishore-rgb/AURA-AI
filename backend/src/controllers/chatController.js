@@ -133,6 +133,41 @@ const setTitleIfDefault = (chat, content, attachments = []) => {
   return chat.title;
 };
 
+// Normalize client-provided message attachments so a message can never be
+// persisted with an attachment that lacks its stored file metadata (`path`).
+// Anything that does not resolve to a real uploaded file (missing path, path
+// traversal, non-object entry) rejects the request instead of silently
+// dropping the image/file from the message.
+const sanitizeMessageAttachments = (attachments) => {
+  if (!Array.isArray(attachments) || attachments.length === 0) return [];
+  const out = [];
+  for (const att of attachments) {
+    if (!att || typeof att !== 'object') {
+      throw new AppError('Invalid attachment in message', 400);
+    }
+    const rawPath = String(att.path || '').trim();
+    if (!rawPath) {
+      throw new AppError('Attachment is missing its stored file path', 400);
+    }
+    if (rawPath.split(/[\\/]/).includes('..')) {
+      throw new AppError('Invalid attachment path', 400);
+    }
+    const mimetype = att.mimetype || '';
+    const type = att.type === 'image' || att.type === 'document'
+      ? att.type
+      : (mimetype.startsWith('image/') ? 'image' : 'document');
+    out.push({
+      id: att.id || null,
+      filename: att.filename || 'attachment',
+      path: rawPath,
+      mimetype,
+      type,
+      size: Number.isFinite(Number(att.size)) ? Number(att.size) : undefined,
+    });
+  }
+  return out;
+};
+
 export const getChats = async (req, res, next) => {
   try {
     if (!req.user) return success(res, []);
@@ -268,7 +303,8 @@ export const sendMessage = async (req, res, next) => {
   try {
     assertOwnProfile(req);
     const { conversationId, content, attachments, mode } = req.body;
-    if (!content && (!attachments || attachments.length === 0)) {
+    const sanitizedAttachments = sanitizeMessageAttachments(attachments);
+    if (!content && sanitizedAttachments.length === 0) {
       throw new AppError('Message content or attachments required', 400);
     }
 
@@ -285,7 +321,7 @@ export const sendMessage = async (req, res, next) => {
       if (isCodingRequest(content || '')) chat.mode = 'coding';
     }
 
-    const hydratedAttachments = await hydrateDocText(attachments || []);
+    const hydratedAttachments = await hydrateDocText(sanitizedAttachments);
 
     const userMessage = await Message.create({
       conversation: chat._id,
@@ -384,6 +420,7 @@ export const streamMessage = async (req, res, next) => {
   try {
     assertOwnProfile(req);
     const { conversationId, content, attachments, regenerate, editMessageId, mode } = req.body;
+    const sanitizedAttachments = sanitizeMessageAttachments(attachments);
 
     let chat;
     if (conversationId) {
@@ -399,7 +436,7 @@ export const streamMessage = async (req, res, next) => {
     }
 
     let triggerContent = content || '';
-    let triggerAttachments = attachments || [];
+    let triggerAttachments = sanitizedAttachments;
 
     let isEdit = false;
     let userMessageId = null;

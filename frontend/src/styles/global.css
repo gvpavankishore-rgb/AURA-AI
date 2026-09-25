@@ -1076,6 +1076,7 @@ input::placeholder, textarea::placeholder {
   border: 1px solid var(--border);
   display: block;
   background: rgba(0, 0, 0, 0.16);
+  cursor: zoom-in;
 }
 
 .msg-image-download {
@@ -2016,6 +2017,56 @@ input::placeholder, textarea::placeholder {
   transform: rotate(90deg);
 }
 
+.image-lightbox-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1002;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(5, 7, 18, 0.92);
+  animation: fadeIn 0.18s ease;
+  padding: 24px;
+}
+.image-lightbox-image {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 92vw;
+  max-height: 86vh;
+}
+.image-lightbox-image img {
+  display: block;
+  max-width: 92vw;
+  max-height: 86vh;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: 4px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.75);
+}
+.image-lightbox-close {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  z-index: 3;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  color: var(--text-secondary);
+  transition: color var(--transition), background var(--transition), transform var(--transition);
+}
+.image-lightbox-close:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+  transform: rotate(90deg);
+}
+
 .camera-overlay {
   position: fixed;
   inset: 0;
@@ -2121,6 +2172,7 @@ input::placeholder, textarea::placeholder {
   .composer-att-thumb { width: 44px; height: 44px; }
   .composer-att-thumb img { width: 44px; height: 44px; border-radius: 10px; }
   .image-preview-overlay { padding: 16px; }
+  .image-lightbox-overlay { padding: 16px; }
 }
 
 .attachment-list {

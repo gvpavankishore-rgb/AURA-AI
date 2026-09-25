@@ -1,10 +1,28 @@
 import multer from 'multer';
 import path from 'path';
+import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import { AppError } from './errorHandler.js';
 
+// multer's diskStorage does NOT create the destination directory: it calls
+// file.writeFile(path) directly asi, so on a fresh production checkout where
+// uploads/ is gitignored (and on Render's ephemeral disk) the first upload
+// fails with ENOENT -> 500. Ensure the directory exists before every write so
+// uploads work out of the box on a clean clone, locally, and in production.
+const ensureUploadDir = (dir) => {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (err) {
+    console.error('[Upload][mkdir] failed to create upload dir:', dir, '->', err?.message || err);
+  }
+};
+
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, 'uploads/'),
+  destination: (req, file, cb) => {
+    const dir = 'uploads/';
+    ensureUploadDir(dir);
+    cb(null, dir);
+  },
   filename: (req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
     cb(null, `${uuidv4()}${ext}`);

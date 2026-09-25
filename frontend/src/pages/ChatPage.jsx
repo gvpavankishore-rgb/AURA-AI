@@ -200,8 +200,15 @@ export default function ChatPage() {
       setShowAuthModal(false);
       const msg = pendingMessage;
       setPendingMessage(null);
-      chatInputRef.current?.clearDraft();
-      handleSend(msg);
+      // Clear the composer only AFTER the message is actually sent. Clearing
+      // first would revoke the attachment blob previews the message relies on
+      // (they are not used for rendering anymore, but the composer must keep
+      // the draft intact so a failed re-send can be retried after sign-in).
+      handleSend(msg)
+        .then((result) => {
+          if (result && result.success) chatInputRef.current?.clearDraft();
+        })
+        .catch(() => {});
     }
   }, [user, pendingMessage]);
 
@@ -443,7 +450,12 @@ export default function ChatPage() {
           isError: true,
           createdAt: new Date().toISOString(),
         }]);
-        return { success: false, failures: failedIndexes };
+      }
+      // Never silently drop an attached image/file: if any of the newly added
+      // uploads failed, hold the whole message and let the composer mark the
+      // failed attachments for retry instead of sending a text-only message.
+      if (failedIndexes.length > 0) {
+        return { success: false, failures: failedIndexes, message: 'Some files could not be uploaded. Please retry or remove them below.' };
       }
     }
 
@@ -481,7 +493,7 @@ export default function ChatPage() {
         _id: 'streaming-user',
         role: 'user',
         content: finalContent,
-        attachments: finalAttachments.map(a => ({ id: a.id, filename: a.filename, type: a.type, path: a.path, mimetype: a.mimetype, preview: a.preview })),
+        attachments: finalAttachments.map(a => ({ id: a.id, filename: a.filename, type: a.type, path: a.path, mimetype: a.mimetype })),
         createdAt: new Date().toISOString(),
       };
       setMessages(prev => [...prev, tempUserMsg]);
