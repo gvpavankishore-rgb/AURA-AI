@@ -42,77 +42,119 @@ const apiBaseUrl = configuredApiUrl || (import.meta.env.DEV ? 'http://localhost:
 // "…/api/api/…" or reversed "…//api" path.
 const BASE = apiBaseUrl.endsWith('/api') ? apiBaseUrl : `${apiBaseUrl}/api`;
 
-// Resolve a backend-served upload path. `path` is the stored relative path
-// (e.g. "uuid.png", "uploads/uuid.png", or a subdir like "uploads/ai/uuid.png").
-// - Development: returns a same-origin relative URL resolved by the Vite dev
-//   proxy (/uploads -> localhost:5001), which avoids cross-origin image
-//   blocking on localhost.
-// - Production: returns the backend origin (the same centralized base) so
-//   uploaded images/documents keep working on the Render static site even
-//   though it lives on a different origin than the backend.
-// Sub-directories are preserved (uploads/ai/...) so enhanced/generated images
-// resolve to their real location under the /uploads static root.
-export const uploadUrl = (path) => {
-  if (!path) return '';
-  let rel = String(path).replace(/\\/g, '/').replace(/^\/+/, '');
-  rel = rel.replace(/^uploads\//, '');
-  const clean = rel.split('/').filter(Boolean).join('/');
-  if (!clean) return '';
-  const origin = import.meta.env.DEV ? '' : apiBaseUrl;
-  return `${origin}/uploads/${clean}`;
+// ---------------------------------------------------------------------------
+// ATTACHMENT URL RESOLUTION
+// ---------------------------------------------------------------------------
+// Attachments live in a PRIVATE Supabase Storage bucket. The backend mints a
+// SHORT-LIVED SIGNED URL for every attachment it returns, and the frontend
+// renders that signed URL. Because those URLs expire (by design, see
+// SUPABASE_STORAGE_SIGNED_URL_TTL), a tab left open outlives them, so the
+// client must be able to swap in a fresh one WITHOUT a full conversation
+// refetch. That is what `signAttachmentPaths` below is for.
+//
+// PRODUCTION NEVER REQUESTS /uploads. A pre-migration row (path `uploads/...`)
+// was stored on Render's ephemeral disk and was never copied into the bucket,
+// so the file is simply gone: requesting it only produced a 404 in the network
+// tab and a broken image. Those attachments resolve to '' and the UI shows an
+// "Image unavailable" placeholder, with zero network traffic.
+// ---------------------------------------------------------------------------
+
+// Only a Supabase signed-URL is ever treated as renderable. A `preview` blob:
+// URL is handled separately (optimistic, never persisted). Anything else — in
+// particular a leftover pre-migration `/uploads/...` value — is refused so it
+// can never reach an <img src> or a fetch().
+const SUPABASE_SIGNED_URL_RE = /\/storage\/v1\/object\/sign\//i;
+
+export const isSignedStorageUrl = (url) => SUPABASE_SIGNED_URL_RE.test(String(url || ''));
+
+// A path that actually lives in the bucket. Everything else is a legacy disk
+// row from before the Supabase Storage migration.
+export const isStorageKey = (path) => String(path || '').startsWith('user-');
+
+// Pull the `token` claim out of a signed URL and read its `exp`, so the client
+// can tell whether a URL it is holding is already dead WITHOUT making a
+// request. Returns 0 when the shape is unexpected (be conservative: treat it
+// as "unknown" and let the reactive retry path handle it).
+export const signedUrlExpiry = (url) => {
+  const raw = String(url || '');
+  if (!isSignedStorageUrl(raw)) return 0;
+  try {
+    const token = new URL(raw).searchParams.get('token');
+    const segment = token?.split('.')[1];
+    if (!segment) return 0;
+    // JWT segments are base64url and usually ship UNPADDED; atob() is strict
+    // about length, so restore the '=' padding before decoding.
+    const b64 = segment.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+    const exp = Number(JSON.parse(atob(padded))?.exp);
+    return Number.isFinite(exp) ? exp * 1000 : 0;
+  } catch {
+    return 0;
+  }
+};
+
+// Renew a signed URL this many ms before it actually expires, so a
+// still-visible image is never swapped out from under the user.
+const SIGNED_URL_RENEW_SKEW_MS = 60 * 1000;
+
+export const isSignedUrlStale = (url) => {
+  const exp = signedUrlExpiry(url);
+  if (!exp) return false; // unknown lifetime -> do not churn requests
+  return exp - Date.now() <= SIGNED_URL_RENEW_SKEW_MS;
 };
 
 const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp)$/i;
 
+// Warn once per distinct reason+path so a long chat with many legacy rows does
+// not flood the console on every render.
+const warnedLegacy = new Set();
+const warnOnce = (key, message) => {
+  if (warnedLegacy.has(key)) return;
+  warnedLegacy.add(key);
+  console.warn(message);
+};
+
 // Resolve the display URL for a message attachment.
 //
-// Attachments live in a PRIVATE Supabase Storage bucket. The backend sends a
-// freshly-minted SHORT-LIVED SIGNED URL on `att.url` on every message/document
-// payload, and that signed URL is what gets rendered. It is re-minted on every
-// fetch, which is why refresh / re-login / redeploy keep working.
-//
 // Precedence:
-//   1. att.preview -> local blob: paints the optimistic bubble instantly, before
-//      the server has replied. Never persisted.
-//   2. att.url     -> signed Supabase Storage URL. Correct for BOTH migrated
-//      and legacy rows.
+//   1. att.preview -> local blob: paints the optimistic bubble instantly,
+//      before the server has replied. Never persisted.
+//   2. att.url     -> signed Supabase Storage URL, valid for BOTH migrated and
+//      legacy rows (a legacy row simply has none).
 //
-// The `/uploads/...` disk fallback applies ONLY to legacy pre-migration rows
-// whose path is not a Supabase key. A migrated attachment (path `user-...`)
-// NEVER falls back to `/uploads`: that endpoint is intentionally empty after
-// the migration and on Render's ephemeral disk it 404s. Falling back there is
-// what previously produced "Image unavailable" instead of a signed URL.
+// Returns '' when nothing renderable exists — the caller shows the graceful
+// "unavailable" placeholder and makes NO network request.
 export const attachmentUrl = (att) => {
   if (!att) return '';
   if (att.preview) return att.preview;
-  if (att.url) return att.url;
+  if (isSignedStorageUrl(att.url)) return att.url;
 
   const path = String(att.path || '');
+  if (!path) return '';
 
-  // Migrated attachment: the signed URL is missing, so surface the problem
-  // instead of silently requesting a path that cannot exist.
-  if (path.startsWith('user-')) {
-    console.warn(
+  if (isStorageKey(path)) {
+    warnOnce(
+      `unsigned:${path}`,
       `[attachments] migrated attachment "${path}" arrived without a signed URL. ` +
       'The backend could not sign it — check the chat-attachments bucket and owner policies ' +
-      'in backend/src/db/storage_setup.sql. Refetch the conversation to retry.'
+      'in backend/src/db/storage_setup.sql. It will be re-requested automatically.'
     );
     return '';
   }
 
-  if (path.startsWith('uploads/')) {
-    console.warn(
-      `[attachments] legacy uploads/ attachment "${path}" has no signed URL. ` +
-      'Falling back to the local /uploads mount, which only works if the file still exists ' +
-      'on the server disk (ephemeral on Render). Re-upload to migrate it to Supabase Storage.'
-    );
-    return uploadUrl(path);
-  }
-
-  if (path) return uploadUrl(path);
+  warnOnce(
+    `legacy:${path}`,
+    `[attachments] legacy attachment "${path}" predates the Supabase Storage migration. ` +
+    'It lived on the backend\'s ephemeral disk and is gone, so no request is made for it ' +
+    '(production never requests /uploads) and the UI shows an "unavailable" placeholder. ' +
+    'Re-upload the file to restore it.'
+  );
   return '';
 };
 
+// True when an attachment should be rendered as a chat image rather than a
+// document chip. Type is authoritative; the extension checks cover rows
+// persisted before `type` was always set.
 export const isImageAttachment = (att) =>
   !!att &&
   (att.type === 'image' ||
@@ -300,6 +342,25 @@ class ApiService {
   async updateChat(id, data) { return this.request(`/chats/${id}`, { method: 'PATCH', body: data, retries: 0 }); }
   async deleteChat(id) { return this.request(`/chats/${id}`, { method: 'DELETE', retries: 0 }); }
   async deleteAllChats() { return this.request('/chats/all', { method: 'DELETE', retries: 0 }); }
+
+  // Mint fresh signed URLs for a specific set of attachments in a conversation.
+  // This is the targeted, cheap alternative to refetching the whole chat: the
+  // backend only signs keys that are actually referenced by that conversation's
+  // messages, and rejects legacy `uploads/...` rows outright.
+  //
+  // Returns { urls: { [path]: signedUrl } }. Missing keys simply mean "not
+  // signable" (legacy row, or an object the caller cannot read).
+  async signAttachmentPaths(chatId, paths) {
+    const list = (Array.isArray(paths) ? paths : [paths])
+      .map((p) => String(p || '').trim())
+      .filter((p) => p && isStorageKey(p));
+    if (!chatId || list.length === 0) return { success: true, data: { urls: {} } };
+    return this.request(`/chats/${chatId}/attachments/sign`, {
+      method: 'POST',
+      body: { paths: [...new Set(list)] },
+      retries: 0,
+    });
+  }
 
   async sendMessage(data) { return this.request('/chat/message', { method: 'POST', body: data, retries: 0 }); }
 

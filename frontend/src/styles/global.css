@@ -285,6 +285,70 @@ input::placeholder, textarea::placeholder {
   z-index: 1;
 }
 
+/* Graceful "this image is gone" card.
+   Rendered in place of a real <img> when an attachment cannot be resolved (a
+   pre-migration uploads/... row, or a retry that also failed). It deliberately
+   mirrors .msg-image's box (same max width / height / radius) so an
+   unrenderable image occupies the space the real one would have and the chat
+   layout never jumps. */
+.smart-image-unavailable {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  box-sizing: border-box;
+  width: min(240px, 100%);
+  min-height: 132px;
+  max-width: min(320px, 100%);
+  max-height: 280px;
+  padding: 14px;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.16);
+  color: var(--text-tertiary);
+  text-align: center;
+}
+
+.smart-image-unavailable-icon {
+  opacity: 0.6;
+}
+
+.smart-image-unavailable-label {
+  font-size: 12px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+/* Inside a user bubble the card is a filled surface, so lift it slightly. */
+.message-row.user .smart-image-unavailable {
+  background: rgba(0, 0, 0, 0.12);
+}
+
+/* Avatars and composer thumbnails are tiny by design — the full-size card
+   would blow them out, so collapse it to the element's own box. */
+.smart-image-mini.smart-image-unavailable {
+  width: 100%;
+  min-height: 0;
+  max-width: 100%;
+  max-height: none;
+  padding: 4px;
+  border-radius: inherit;
+}
+
+.smart-image-mini.smart-image-unavailable .smart-image-unavailable-label {
+  display: none;
+}
+
+/* In the lightbox the card should fill the viewer, not float in the middle. */
+.image-lightbox-image.smart-image-unavailable {
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  min-height: min(50vh, 360px);
+}
+
 .image-preview-image {
   min-width: min(70vw, 700px);
   min-height: min(50vh, 360px);

@@ -1,6 +1,7 @@
 import Conversation from '../models/Conversation.js';
 import Message from '../models/Message.js';
 import Memory from '../models/Memory.js';
+import env from '../config/env.js';
 import { AppError } from '../middleware/errorHandler.js';
 import { success, created } from '../utils/response.js';
 import { processMessage, isSafeAiErrorMessage } from '../services/aiService.js';
@@ -270,6 +271,49 @@ export const getChat = async (req, res, next) => {
     // re-login and Render redeploys (signed URLs are short-lived by design).
     await withSignedUrls(messages);
     success(res, { chat, messages });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Re-sign the attachments a client is currently displaying.
+//
+// Signed URLs are short-lived BY DESIGN, so a conversation left open in a tab
+// will outlive the URLs that were handed to it at load time. Rather than
+// letting the client hold a dead URL until the next full chat fetch, it asks
+// for exactly the keys it needs and gets freshly minted ones back.
+//
+// Authorisation is deliberately narrow:
+//   * the conversation must belong to the caller (same check as getChat), and
+//   * every requested key must actually be referenced by one of THAT
+//     conversation's messages, so this cannot be used to mint URLs for
+//     arbitrary objects in the bucket.
+// Legacy `uploads/...` rows are rejected by storageService.signPaths: there is
+// nothing in the bucket to sign, and the client must never request /uploads.
+export const refreshAttachmentUrls = async (req, res, next) => {
+  try {
+    if (!req.user) throw new AppError('Authentication required', 401);
+    const chat = await Conversation.findOne({ _id: req.params.id, user: req.user._id });
+    if (!chat) throw new AppError('Chat not found', 404);
+
+    const requested = Array.isArray(req.body?.paths) ? req.body.paths : [];
+    if (requested.length === 0) return success(res, { urls: {} });
+
+    const messages = await Message.find({ conversation: chat._id }).select('attachments');
+    const owned = new Set();
+    for (const msg of messages) {
+      for (const att of (Array.isArray(msg.attachments) ? msg.attachments : [])) {
+        const p = String(att?.path || '').trim();
+        if (p) owned.add(p);
+      }
+    }
+
+    const paths = requested
+      .map((p) => String(p || '').trim())
+      .filter((p) => p && owned.has(p));
+
+    const urls = await storageService.signPaths(paths);
+    success(res, { urls, expiresIn: env.supabaseStorageSignedUrlTtl });
   } catch (err) {
     next(err);
   }

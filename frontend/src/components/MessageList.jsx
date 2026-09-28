@@ -4,7 +4,7 @@ import ChatAvatar from './ChatAvatar';
 import ActionPermissionCard from './ActionPermissionCard';
 import DeveloperProfileCard from './DeveloperProfileCard';
 import { useAuth } from '../context/AuthContext';
-import { attachmentUrl, isImageAttachment } from '../services/api';
+import { attachmentUrl, isImageAttachment, isSignedUrlStale, isStorageKey } from '../services/api';
 import useAutoScroll from '../hooks/useAutoScroll';
 import SmartImage from './SmartImage';
 import ImageLightbox from './ImageLightbox';
@@ -12,8 +12,7 @@ import { createTtsSpeaker, STATE } from '../utils/ttsController';
 
 const MarkdownContent = lazy(() => import('./MarkdownContent'));
 
-const downloadAttachment = (att) => {
-  const href = attachmentUrl(att);
+const downloadUrl = (href) => {
   if (!href) return;
   const a = document.createElement('a');
   a.href = href;
@@ -50,11 +49,118 @@ const sourcesForMessage = (msg) => {
   return [];
 };
 
+// ---------------------------------------------------------------------------
+// AttachmentImage
+// ---------------------------------------------------------------------------
+// One image attachment, resilient to the short lifetime of signed URLs.
+//
+// Supabase signed URLs are temporary by design (see
+// SUPABASE_STORAGE_SIGNED_URL_TTL), so a chat left open in a tab will outlive
+// the URLs that were handed to it when the messages loaded. Two mechanisms
+// keep the image on screen without the user doing anything:
+//
+//   1. PROACTIVE — as soon as the URL in hand is within a minute of expiring,
+//      ask the backend for a fresh one and swap it in while it still works.
+//   2. REACTIVE — if the browser rejects the URL anyway (403 / expired), ask
+//      for a fresh one and retry the load ONCE. Only when that retry also
+//      fails do we fall through to the graceful "unavailable" card.
+//
+// A legacy pre-migration `uploads/...` attachment is filtered out before we
+// ever get here: those files no longer exist, so we must not issue a request
+// that could only 404.
+function AttachmentImage({ att, onImageClick, onRefreshPaths }) {
+  const initialUrl = useMemo(() => attachmentUrl(att), [att]);
+  const [url, setUrl] = useState(initialUrl);
+  const [retrying, setRetrying] = useState(false);
+  // Total reactive retries allowed per server-provided URL. Keyed on the
+  // SERVER payload (not on the URL we swapped in), so a fresh signed URL that
+  // also fails falls through to the unavailable card instead of looping.
+  const retriesRef = useRef(0);
+  const path = String(att?.path || '');
+  const recoverable = isStorageKey(path) && Boolean(onRefreshPaths);
+
+  // Adopt whatever the parent hands down (fresh chat load, regenerated
+  // message) and reset the retry budget for it.
+  useEffect(() => {
+    setUrl(initialUrl);
+    retriesRef.current = 0;
+  }, [initialUrl]);
+
+  const requestFreshUrl = useCallback(async () => {
+    if (!recoverable) return '';
+    const res = await onRefreshPaths([path]);
+    return res?.[path] || '';
+  }, [onRefreshPaths, path, recoverable]);
+
+  // (1) Proactive renewal: renew shortly before expiry so a visible image is
+  // never swapped out from under the user. This is silent and does NOT consume
+  // the reactive retry budget.
+  useEffect(() => {
+    if (!url || !recoverable) return undefined;
+    if (!isSignedUrlStale(url)) return undefined;
+    let cancelled = false;
+    requestFreshUrl().then((fresh) => {
+      if (!cancelled && fresh && fresh !== url) setUrl(fresh);
+    });
+    return () => { cancelled = true; };
+  }, [url, recoverable, requestFreshUrl]);
+
+  // (2) Reactive retry: when the browser rejects the URL (403 / expired), ask
+  // for a fresh one exactly ONCE and let the <img> retry the load. Only when
+  // that also fails does SmartImage fall through to the unavailable card.
+  const handleError = useCallback(async () => {
+    if (!recoverable || !url) return;
+    if (retriesRef.current >= 1) return;
+    retriesRef.current += 1;
+    setRetrying(true);
+    try {
+      const fresh = await requestFreshUrl();
+      if (fresh && fresh !== url) {
+        setUrl(fresh);
+        return;
+      }
+    } catch {
+      /* fall through to the unavailable card */
+    } finally {
+      setRetrying(false);
+    }
+  }, [recoverable, url, requestFreshUrl]);
+
+  return (
+    <div className="msg-image-wrap">
+      <SmartImage
+        src={url}
+        alt=""
+        className="msg-image"
+        skeletonStyle={{ borderRadius: 12 }}
+        referrerPolicy="no-referrer"
+        retrying={retrying}
+        onError={handleError}
+        onClick={() => url && onImageClick?.(url)}
+      />
+      {url && (
+        <button
+          className="msg-image-download"
+          onClick={(e) => { e.stopPropagation(); downloadUrl(url); }}
+          aria-label="Download image"
+          title="Download image"
+        >
+          <Download size={12} />
+        </button>
+      )}
+    </div>
+  );
+}
+
 const revealedContentIds = new Set();
 
-function MessageBody({ msg, isLast, streaming, onImageClick }) {
+function MessageBody({ msg, isLast, streaming, onImageClick, onRefreshPaths }) {
   const attachmentsArr = Array.isArray(msg.attachments) ? msg.attachments : [];
-  const images = attachmentsArr.filter(a => isImageAttachment(a) && attachmentUrl(a));
+  // NOTE: intentionally NOT filtered on attachmentUrl() — a legacy pre-migration
+  // attachment now resolves to '' in production (no /uploads request), and we
+  // still want its slot rendered so SmartImage can show "Image unavailable"
+  // instead of the image silently vanishing from the message.
+  const images = attachmentsArr.filter(a => isImageAttachment(a));
   const others = attachmentsArr.filter(a => !isImageAttachment(a));
   const sources = sourcesForMessage(msg);
   const revealContent = !!(
@@ -87,24 +193,12 @@ function MessageBody({ msg, isLast, streaming, onImageClick }) {
       {images.length > 0 && (
         <div className="msg-images">
           {images.map((att, i) => (
-            <div key={i} className="msg-image-wrap">
-              <SmartImage
-                src={attachmentUrl(att)}
-                alt=""
-                className="msg-image"
-                skeletonStyle={{ borderRadius: 12 }}
-                referrerPolicy="no-referrer"
-                onClick={() => onImageClick?.(attachmentUrl(att))}
-              />
-              <button
-                className="msg-image-download"
-                onClick={(e) => { e.stopPropagation(); downloadAttachment(att); }}
-                aria-label="Download image"
-                title="Download image"
-              >
-                <Download size={12} />
-              </button>
-            </div>
+            <AttachmentImage
+              key={`${att?.path || att?.id || i}`}
+              att={att}
+              onImageClick={onImageClick}
+              onRefreshPaths={onRefreshPaths}
+            />
           ))}
         </div>
       )}
@@ -152,7 +246,7 @@ function MessageBody({ msg, isLast, streaming, onImageClick }) {
   );
 }
 
-const MessageItem = memo(function MessageItem({ msg, isLast, streaming, user, onRegenerateFromMessage, onEditRequest, busy, onEnhanceImage, speaker, onToggleSpeak, appear, onImageClick }) {
+const MessageItem = memo(function MessageItem({ msg, isLast, streaming, user, onRegenerateFromMessage, onEditRequest, busy, onEnhanceImage, speaker, onToggleSpeak, appear, onImageClick, onRefreshPaths }) {
   const [copied, setCopied] = useState(false);
   const animateIn = useRef(appear).current;
   const isActionCard = msg.kind === 'action_confirmation' || msg.type === 'action_confirmation';
@@ -176,7 +270,7 @@ const MessageItem = memo(function MessageItem({ msg, isLast, streaming, user, on
       />
       <div className="message-main">
         <div className="message-bubble">
-          <MessageBody msg={msg} isLast={isLast} streaming={streaming} onImageClick={onImageClick} />
+          <MessageBody msg={msg} isLast={isLast} streaming={streaming} onImageClick={onImageClick} onRefreshPaths={onRefreshPaths} />
         </div>
 
         {!isActionCard && (
@@ -296,7 +390,7 @@ function findStart(offsets, scrollTop) {
   return ans;
 }
 
-const VirtualRow = memo(function VirtualRow({ msg, rowKey, offset, isLast, streaming, user, busy, speaker, onToggleSpeak, onEditRequest, onRegenerateFromMessage, onEnhanceImage, onMeasured, appear, onConsumeAppear, onImageClick }) {
+const VirtualRow = memo(function VirtualRow({ msg, rowKey, offset, isLast, streaming, user, busy, speaker, onToggleSpeak, onEditRequest, onRegenerateFromMessage, onEnhanceImage, onMeasured, appear, onConsumeAppear, onImageClick, onRefreshPaths }) {
   const ref = useRef(null);
 
   useLayoutEffect(() => {
@@ -331,12 +425,13 @@ const VirtualRow = memo(function VirtualRow({ msg, rowKey, offset, isLast, strea
         onEnhanceImage={onEnhanceImage}
         appear={appear}
         onImageClick={onImageClick}
+        onRefreshPaths={onRefreshPaths}
       />
     </div>
   );
 });
 
-export default function MessageList({ messages = [], streaming, loading, onEditRequest, onRegenerateFromMessage, onEnhanceImage, followToken = 0 }) {
+export default function MessageList({ messages = [], streaming, loading, onEditRequest, onRegenerateFromMessage, onEnhanceImage, followToken = 0, onRefreshAttachment }) {
   const { user } = useAuth();
   const busy = loading || streaming;
   const containerRef = useRef(null);
@@ -348,11 +443,52 @@ export default function MessageList({ messages = [], streaming, loading, onEditR
   const prevMsgRef = useRef(null);
   const scrollRafRef = useRef(null);
   const revisionRafRef = useRef(null);
+  // path -> in-flight re-sign promise, so duplicate requests share one call.
+  const inflightPathsRef = useRef(new Map());
   const [revision, setRevision] = useState(0);
   const [range, setRange] = useState({ start: 0, end: INITIAL_END });
   const [speaker, setSpeaker] = useState({ msgId: null, state: 'idle', error: false });
   const [lightboxUrl, setLightboxUrl] = useState(null);
   const { showScrollButton, scrollToBottom } = useAutoScroll(containerRef, { streaming, followToken });
+
+  // Ask the backend for freshly minted signed URLs and hand back
+  // { [path]: url }.
+  //
+  // In-flight requests are SHARED, not merely de-duplicated: a chat can hold
+  // several copies of one image (e.g. an attachment and its regeneration) and
+  // they all expire at the same instant, so a burst of 403s would otherwise
+  // either send N identical requests or — if a naive "already pending, skip it"
+  // guard were used — leave the losers with an empty result and show a false
+  // "unavailable" card. Every caller awaits the same promise and gets the same
+  // URL back.
+  const refreshPaths = useCallback(async (paths) => {
+    const wanted = [...new Set(
+      (Array.isArray(paths) ? paths : [paths])
+        .map((p) => String(p || '').trim())
+        // Only bucket objects are re-signable. A legacy pre-migration
+        // `uploads/...` row has nothing behind it, so filtering here means no
+        // caller can ever spend a request on one.
+        .filter((p) => p && isStorageKey(p)),
+    )];
+    if (!wanted.length || typeof onRefreshAttachment !== 'function') return {};
+
+    const started = wanted.filter((path) => !inflightPathsRef.current.has(path));
+    for (const path of started) {
+      const promise = Promise.resolve()
+        .then(() => onRefreshAttachment([path]))
+        .then((res) => (res && typeof res === 'object' ? { [path]: res[path] } : {}))
+        .catch(() => ({}))
+        .finally(() => inflightPathsRef.current.delete(path));
+      inflightPathsRef.current.set(path, promise);
+    }
+    // Paths that were already in flight contribute their EXISTING promise, so
+    // duplicates collapse into a single round trip and every caller gets a
+    // real answer rather than a false "unavailable".
+    const settled = await Promise.all(
+      wanted.map((p) => inflightPathsRef.current.get(p)).filter(Boolean),
+    );
+    return Object.assign({}, ...settled);
+  }, [onRefreshAttachment]);
 
   // One TTS controller owns the speechSynthesis session for this message list,
   // so Play / Pause / Resume always share the same queue, chunks, and position.
@@ -530,6 +666,7 @@ export default function MessageList({ messages = [], streaming, loading, onEditR
                 appear={appearSetRef.current.has(rowKey)}
                 onConsumeAppear={onConsumeAppear}
                 onImageClick={setLightboxUrl}
+                onRefreshPaths={refreshPaths}
               />
             );
           })}

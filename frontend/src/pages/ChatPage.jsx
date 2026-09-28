@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate, useOutletContext } from 'react-router-dom';
 import { Menu, Square, RefreshCw, RotateCcw, Sparkles } from 'lucide-react';
-import api, { attachmentUrl } from '../services/api';
+import api, { attachmentUrl, isSignedUrlStale, isStorageKey } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import MessageList from '../components/MessageList';
 import ChatInput from '../components/ChatInput';
@@ -148,6 +148,35 @@ export default function ChatPage() {
       if (rid === loadRidRef.current) setHistoryLoading(false);
     }
   }, [navigate]);
+
+  // Mint fresh signed URLs for a specific set of attachments in the open chat.
+  //
+  // The backend re-signs every attachment on each `getChat`, so a page load, a
+  // logout/login cycle and any conversation switch already come back with valid
+  // URLs. This covers the remaining case: the tab stays open past the signed
+  // URL's lifetime, so an image the user is still looking at turns into a 403.
+  // Returns { [path]: signedUrl } so the caller can retry the specific image
+  // that failed instead of refetching the whole conversation.
+  const refreshAttachment = useCallback(async (paths) => {
+    const chatId = chatRef.current;
+    const wanted = (Array.isArray(paths) ? paths : [paths])
+      .map((p) => String(p || '').trim())
+      .filter((p) => p && isStorageKey(p));
+    if (!chatId || !wanted.length) return {};
+    const res = await api.signAttachmentPaths(chatId, wanted);
+    return res?.success && res.data?.urls ? res.data.urls : {};
+  }, []);
+
+  // Resolve a guaranteed-valid URL for an attachment right before it is used
+  // for a network operation (today: the Enhance flow, which fetches the bytes
+  // to re-upload them). Renews first when the URL in hand is already stale.
+  const ensureFreshUrl = useCallback(async (att) => {
+    const current = attachmentUrl(att);
+    const path = String(att?.path || '');
+    if (!current || !isStorageKey(path) || !isSignedUrlStale(current)) return current;
+    const urls = await refreshAttachment([path]);
+    return urls[path] || current;
+  }, [refreshAttachment]);
 
   useEffect(() => {
     if (!chatId) {
@@ -398,8 +427,9 @@ export default function ChatPage() {
     }
 
     let finalContent = content || '';
-    let finalAttachments = [];
-    let failedIndexes = [];
+  let finalAttachments = [];
+  let failedIndexes = [];
+  let failureMessage = '';
 
     if (regenerate) {
       const lastUserMsg = [...messagesRef.current].reverse().find(m => m.role === 'user');
@@ -435,9 +465,22 @@ export default function ChatPage() {
         try {
           const up = await api.uploadChatFile(att.file);
           if (up.success && up.data) finalAttachments.push({ ...up.data, preview: att.preview });
-          else failedIndexes.push((attachments || []).indexOf(att));
-        } catch {
+          else {
+            failedIndexes.push((attachments || []).indexOf(att));
+            // The notice the user reads stays short and safe; the full reason
+            // goes to the console so a deployment/storage problem is still
+            // diagnosable from the browser without a server-log tail.
+            if (!failureMessage && up?.message) {
+              failureMessage = up.message;
+              console.error('[upload] failed:', up.message, up);
+            }
+          }
+        } catch (err) {
           failedIndexes.push((attachments || []).indexOf(att));
+          if (!failureMessage) {
+            failureMessage = err?.message || '';
+            console.error('[upload] failed:', err);
+          }
         }
       }
 
@@ -455,7 +498,13 @@ export default function ChatPage() {
       // uploads failed, hold the whole message and let the composer mark the
       // failed attachments for retry instead of sending a text-only message.
       if (failedIndexes.length > 0) {
-        return { success: false, failures: failedIndexes, message: 'Some files could not be uploaded. Please retry or remove them below.' };
+        return {
+          success: false,
+          failures: failedIndexes,
+          message: failureMessage
+            ? `Some files could not be uploaded: ${failureMessage}`
+            : 'Some files could not be uploaded. Please retry or remove them below.',
+        };
       }
     }
 
@@ -532,7 +581,9 @@ export default function ChatPage() {
     const results = [];
     try {
       for (const att of images) {
-        const res = await fetch(attachmentUrl(att));
+        const freshUrl = await ensureFreshUrl(att);
+        if (!freshUrl) throw new Error('Could not read the image.');
+        const res = await fetch(freshUrl);
         if (!res.ok) throw new Error('Could not read the image.');
         const blob = await res.blob();
         const file = new File([blob], 'enhance.png', { type: blob.type || 'image/png' });
@@ -564,7 +615,7 @@ export default function ChatPage() {
     } finally {
       setLoading(false);
     }
-  }, [user, loading, streaming]);
+  }, [user, loading, streaming, ensureFreshUrl]);
 
   const handleRegenerateFromMessage = useCallback((messageId) => {
     const idx = messagesRef.current.findIndex(m => m._id === messageId && m.role === 'assistant');
@@ -668,6 +719,7 @@ export default function ChatPage() {
             onEditRequest={handleEditRequest}
             onRegenerateFromMessage={handleRegenerateFromMessage}
             onEnhanceImage={handleEnhanceImage}
+            onRefreshAttachment={refreshAttachment}
           />
           {(showRetry || showRegenerate) && (
             <div className="chat-container" style={{ padding: '6px 0 14px', display: 'flex', gap: 6, justifyContent: 'center' }}>

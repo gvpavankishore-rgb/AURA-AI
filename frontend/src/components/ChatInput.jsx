@@ -784,13 +784,19 @@ const ChatInput = forwardRef(function ChatInput({ onSend, onStop, loading, place
         <ImagePreviewOverlay url={previewUrl} onClose={() => setPreviewUrl(null)} />
       </Suspense>
 
-      <Suspense fallback={null}>
-        <CameraOverlay
-          open={cameraOpen}
-          onClose={() => setCameraOpen(false)}
-          onCapture={(file) => addAttachment(file, 'image')}
-        />
-      </Suspense>
+      {/* Mounted ONLY while the user has explicitly picked the camera option
+          from the attachment menu. Previously this was rendered
+          unconditionally, so the full-screen .camera-overlay covered the page
+          from first render on the home / new-chat screen. */}
+      {cameraOpen && (
+        <Suspense fallback={null}>
+          <CameraOverlay
+            open
+            onClose={() => setCameraOpen(false)}
+            onCapture={(file) => addAttachment(file, 'image')}
+          />
+        </Suspense>
+      )}
     </div>
   );
 });

@@ -83,6 +83,98 @@ const objectKey = ({ authUid, filename = '', ext = '' }) => {
   return `${folder}/${base}${safeExt ? `.${safeExt}` : ''}`;
 };
 
+// -----------------------------------------------------------------------------
+// Storage error classification
+// -----------------------------------------------------------------------------
+// A raw Supabase Storage failure is opaque: a missing bucket, a missing policy
+// and a rejected object all collapse into the same generic 500, which is why
+// "POST /api/chat/upload 500" was impossible to diagnose in production. Map the
+// cases we can actually act on to a specific error so the cause is named.
+//
+// Each entry has two parts and the split is deliberate:
+//   * `user`  — returned to the client. Short, human, and free of internal file
+//               paths / SQL instructions. Safe to render in the UI.
+//   * `hint`  — written ONLY to the server log, where the operator needs it.
+//               This is where "run backend/src/db/storage_setup.sql" belongs, so
+//               a user never sees deployment instructions.
+const MISSING_BUCKET_HINT =
+  `The private Supabase Storage bucket "${BUCKET}" does not exist in this project. ` +
+  'Run backend/src/db/storage_setup.sql once in the Supabase Dashboard -> SQL Editor ' +
+  '(it creates the bucket and the owner-only policies), then verify with ' +
+  '`cd backend && npm run storage:check` and restart the backend.';
+
+const RLS_HINT =
+  `The bucket "${BUCKET}" exists but the owner-scoped INSERT policy rejected the write. ` +
+  "Re-run backend/src/db/storage_setup.sql in the Supabase Dashboard -> SQL Editor so the " +
+  "'user-' || auth.uid()::text folder policies are (re)created, then verify with " +
+  '`cd backend && npm run storage:check`.';
+
+const STORAGE_ERROR_MAP = [
+  {
+    // Supabase reports a missing bucket as 404/NoSuchBucket, or as a bare 400
+    // whose body still says "Bucket not found".
+    match: (e) =>
+      e?.code === 'NoSuchBucket' ||
+      /bucket not found/i.test(e?.message || '') ||
+      /bucket not found/i.test(e?.error || ''),
+    status: 503,
+    user: 'Image storage is not set up on this server yet. Uploads are temporarily unavailable.',
+    hint: MISSING_BUCKET_HINT,
+  },
+  {
+    // The bucket exists but the owner-scoped INSERT policy is absent/mismatched.
+    // Match on the MESSAGE TEXT or the Postgres 42501 code, never on a bare
+    // "AccessDenied": Supabase also returns code=AccessDenied for things that
+    // have nothing to do with policies (e.g. a malformed JWT), and folding
+    // those together sends the operator chasing a policy that is fine.
+    match: (e) =>
+      /row-level security|new row violates/i.test(e?.message || '') ||
+      e?.code === '42501',
+    status: 503,
+    user: 'Image storage rejected this upload for permission reasons. Please try again.',
+    hint: RLS_HINT,
+  },
+  {
+    // The request's JWT was rejected by Supabase. This is a session/identity
+    // problem, not a storage-permission problem, and must not be reported as one.
+    match: (e) =>
+      /invalid compact jws|invalid jwt|jwt expired|token is expired/i.test(e?.message || '') ||
+      e?.statusCode === 401,
+    status: 401,
+    user: 'Your session has expired. Please sign in again.',
+    hint:
+      'Supabase rejected the caller\'s access token on the Storage API. This is a session problem, ' +
+      'not a bucket-policy problem. Check the request-scoped client in config/supabase.js and the token forwarded by authenticate.',
+  },
+  {
+    // Signed-URL creation can fail simply because the object is already gone.
+    match: (e) => /Object not found/i.test(e?.message || '') || e?.code === '404',
+    status: 404,
+    user: 'The stored file could not be found.',
+    hint: `Object missing in bucket "${BUCKET}". The row may reference a deleted object.`,
+  },
+  {
+    match: (e) => /exceeded the maximum allowed size|too large/i.test(e?.message || ''),
+    status: 413,
+    user: 'That file is too large to upload.',
+    hint: `Upload exceeded the bucket size limit for "${BUCKET}".`,
+  },
+];
+
+// Turn a Supabase Storage error into an AppError. The client gets `user`; the
+// operator gets `hint` in the log. Anything unrecognised still surfaces its real
+// text in the log so it stays debuggable, and keeps a generic message on the
+// client rather than leaking a raw driver error.
+export const toStorageAppError = (err, fallbackMessage = 'Could not process the file') => {
+  const hit = STORAGE_ERROR_MAP.find((m) => m.match(err));
+  if (hit) {
+    console.error(`[Storage] ${hit.hint} | underlying: ${err?.message || err}`);
+    return new AppError(hit.user, hit.status);
+  }
+  console.error(`[Storage][unexpected] ${fallbackMessage}: ${err?.message || err}`);
+  return new AppError(fallbackMessage, err?.statusCode || 500);
+};
+
 // Upload an in-memory buffer to the caller's own folder. Returns the storage
 // key (the value persisted in attachment.path) — never a disk path.
 export const uploadBuffer = async ({ authUid, buffer, contentType = 'application/octet-stream', filename = '', ext = '' }) => {
@@ -91,7 +183,6 @@ export const uploadBuffer = async ({ authUid, buffer, contentType = 'application
   if (!buffer || !Buffer.isBuffer(buffer) || buffer.length === 0) {
     throw new AppError('No upload data provided', 400);
   }
-  const lastUidByte = String(authUid).trim().slice(-1);
   const key = objectKey({ authUid, filename, ext: ext || filename?.split('.')?.pop?.() || '' });
 
   const { error } = await getRequestClient().storage.from(BUCKET).upload(key, buffer, {
@@ -101,7 +192,7 @@ export const uploadBuffer = async ({ authUid, buffer, contentType = 'application
   });
   if (error) {
     console.error('[Storage][upload] could not save attachment:', error?.message || error);
-    throw new AppError('Could not store the uploaded file', 500);
+    throw toStorageAppError(error, 'Could not store the uploaded file');
   }
   const url = await getSignedUrl(key).catch(() => '');
   return { path: key, url };
@@ -113,7 +204,7 @@ export const downloadBuffer = async (path) => {
   const { data, error } = await getRequestClient().storage.from(BUCKET).download(path);
   if (error || !data) {
     console.error('[Storage][download] could not read attachment:', error?.message || error);
-    throw new AppError('Could not read the stored attachment', 500);
+    throw toStorageAppError(error, 'Could not read the stored attachment');
   }
   const buffer = await data.arrayBuffer();
   return Buffer.from(buffer);
@@ -137,6 +228,13 @@ export const getSignedUrl = async (path, ttlSeconds = env.supabaseStorageSignedU
   return data.signedUrl;
 };
 
+// TRUE for a key that actually lives in the bucket, i.e. an object written
+// under `user-{authUid}/` by uploadBuffer(). This is the single discriminator
+// the whole codebase uses to tell a post-migration attachment from a legacy
+// `uploads/...` disk row, so it stays the gate for anything that signs, reads
+// or deletes storage bytes.
+export const isStorageKey = (path) => String(path || '').startsWith('user-');
+
 export const getPublicUrl = (path) => {
   if (!BUCKET || !path) return '';
   return `${String(env.supabaseUrl).replace(/\/+$/, '')}/storage/v1/object/public/${BUCKET}/${String(path).replace(/^\/+/, '')}`;
@@ -156,9 +254,12 @@ export const deleteObject = async (path) => {
 //   { path, url, type, mimetype, size }
 //
 // Attachments whose `path` is a LEGACY `uploads/...` disk reference are
-// returned untouched: they were never migrated into the bucket, so there is
-// nothing to sign, and the frontend is allowed to resolve them against the
-// temporary /uploads static mount during cutover.
+// returned WITHOUT a `url`. They were never migrated into the bucket, so
+// there is nothing to sign, and the file they point at only ever existed on
+// Render's ephemeral disk. Handing back any leftover absolute `uploads/...`
+// URL here is what used to produce a guaranteed 404 in the browser's network
+// tab, so the stale value is actively dropped: the frontend then renders a
+// calm "unavailable" placeholder without issuing a single request.
 export const withSignedUrl = async (att) => {
   if (!att || typeof att !== 'object') return att;
   const p = String(att.path || '');
@@ -170,16 +271,24 @@ export const withSignedUrl = async (att) => {
 
   if (!p) {
     console.warn('[Storage][attachment] attachment row has no `path` and cannot be resolved.');
+    delete att.url;
     return att;
   }
 
-  if (!p.startsWith('user-')) {
-    if (!att.url) {
+  if (!isStorageKey(p)) {
+    if (att.url) {
+      console.warn(
+        `[Storage][legacy] attachment "${p}" still carried a pre-migration URL. ` +
+        'Dropping it: the browser must never request /uploads in production.'
+      );
+      delete att.url;
+    } else {
       console.warn(
         `[Storage][legacy] attachment "${p}" has no signed URL. ` +
-        'It is a pre-migration uploads/... row: the backend can only serve it if the file ' +
-        'still exists in backend/uploads (ephemeral on Render, so expect 404 after a deploy). ' +
-        'Re-upload the file to move it into Supabase Storage.'
+        'It is a pre-migration uploads/... row: the bytes only ever existed on the ' +
+        'ephemeral backend disk and were never copied into the bucket, so the file is ' +
+        'unrecoverable without a re-upload. The frontend renders an "unavailable" ' +
+        'placeholder and issues no network request for it.'
       );
     }
     return att;
@@ -189,6 +298,7 @@ export const withSignedUrl = async (att) => {
   if (url) {
     att.url = url;
   } else {
+    delete att.url;
     console.error(
       `[Storage][withSignedUrl] could not sign migrated attachment "${p}". ` +
       'The frontend will be unable to render it until the bucket + owner RLS policies are applied.'
@@ -224,14 +334,41 @@ function inferMimeFromName(name = '') {
 export const withSignedUrls = async (attachments = []) =>
   Promise.all((attachments || []).filter(Boolean).map(withSignedUrl));
 
+// Re-sign a set of already-persisted storage keys and return
+// { "<path>": "<fresh signed url>" }.
+//
+// This is what makes long-lived chat sessions survive the short signed-URL
+// lifetime without the client ever holding a stale URL: the frontend asks for
+// the exact keys it is about to render, scoped to the conversation it is
+// already authorised to read, and gets back URLs minted at that instant.
+// Legacy `uploads/...` rows are never passed through here — there is nothing
+// in the bucket to sign, and returning a blank keeps the browser from ever
+// requesting /uploads.
+export const signPaths = async (paths = []) => {
+  const keys = [...new Set(
+    (Array.isArray(paths) ? paths : [paths])
+      .map((p) => String(p || '').trim())
+      .filter((p) => p && isStorageKey(p) && !p.split('/').includes('..')),
+  )];
+
+  const entries = await Promise.all(
+    keys.map(async (path) => [path, await getSignedUrl(path).catch(() => '')]),
+  );
+
+  return Object.fromEntries(entries.filter(([, url]) => Boolean(url)));
+};
+
 export default {
   uploadBuffer,
   downloadBuffer,
   getSignedUrl,
   getPublicUrl,
   deleteObject,
+  isStorageKey,
   withSignedUrl,
   withSignedUrls,
+  signPaths,
+  toStorageAppError,
   userFolder,
   BUCKET,
 };

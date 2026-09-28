@@ -132,6 +132,10 @@ export const CameraOverlay = memo(function CameraOverlay({ open, onClose, onCapt
 
   const videoReady = ready && !captured && !error;
 
+  // The overlay must not render (and must not cover the composer) when the
+  // camera is closed. Placed AFTER every hook so the Rules of Hooks hold.
+  if (!open) return null;
+
   return (
     <div className="camera-overlay" role="dialog" aria-modal="true" aria-label="Camera capture">
       <div className="camera-modal">
