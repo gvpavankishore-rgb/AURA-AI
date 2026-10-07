@@ -11,9 +11,7 @@ import { detectAction, buildUnsupportedMessage } from '../services/actionDetecto
 import { isDeveloperQuery } from '../services/developerInfo.js';
 import { isCodingRequest } from '../services/intentDetector.js';
 import * as webSearchService from '../services/webSearchService.js';
-import { detectWebSearchIntent } from '../services/webSearchDetector.js';
-import * as weatherService from '../services/weatherService.js';
-import { getCurrentDateTimeResponse } from '../services/dateTimeService.js';
+import { planSearch } from '../services/searchPlanner.js';
 
 const MAX_DOC_CONTEXT = 24000;
 const CHAT_PAGE_DEFAULT_LIMIT = 50;
@@ -21,70 +19,78 @@ const CHAT_PAGE_MAX_LIMIT = 100;
 
 const CHAT_MODES = ['chat', 'coding', 'voice', 'documents', 'translate'];
 
-const ASK_LOCATION_MESSAGE = 'Which city or location should I check the weather for?';
-const ASK_LOCATION_FULL = `${ASK_LOCATION_MESSAGE} For example: "weather in Hyderabad" or "what is the temperature in London today?"`;
-
-// Web-search / live-data pipeline stage helper:
-//  - "none"   -> normal OpenRouter flow (no live info requested)
-//  - "static" -> answer without the AI (real weather, weather location prompt,
-//                current date/time, or search unavailable / no results)
-//  - "search" -> perform the web search, attach sources + context for the AI
-const runWebSearchStage = async (content, user = null) => {
-  // Explicit current date/time questions are answered from the server clock
-  // (timezone-aware). This runs first so e.g. "current date and time" never
-  // reaches the live web search or the LLM's internal knowledge.
-  const currentTime = getCurrentDateTimeResponse(content || '', user);
-  if (currentTime) {
-    return { type: 'static', content: currentTime.content, metadata: currentTime.metadata };
-  }
-
-  const intent = detectWebSearchIntent(content || '');
-  if (!intent.needsSearch) return { type: 'none' };
-
-  // Dedicated real-time weather: bypasses OpenRouter entirely and returns a
-  // clean AURA-style weather block. Falls back to web search only when the
-  // weather service is not configured.
-  if (intent.weather) {
-    if (!intent.location) {
-      return { type: 'static', content: ASK_LOCATION_FULL };
-    }
-    const weatherResult = await weatherService.tryGetWeather(intent.location);
-    if (weatherResult.type === 'ok') {
-      return { type: 'static', content: weatherResult.message, metadata: weatherResult.metadata };
-    }
-    if (weatherResult.type === 'error') {
-      return { type: 'static', content: weatherResult.message, metadata: { weather: { used: true, error: true } } };
-    }
-    console.warn('[Weather] WEATHER_API_KEY missing — falling back to web search for weather query.');
-  }
-
+// Universal web-search stage. EVERY non-empty user question goes through the
+// live web first: there is deliberately NO topic/keyword classifier, no
+// whitelist and no "should we search?" decision based on the question's
+// content. The same code path handles a question the developer has never seen.
+//
+// The reusable planning (conversation-aware query -> search -> relevance
+// check -> optional refined search) lives in services/searchPlanner.js;
+// this function only maps its outcome onto the three stage types:
+//
+//   - "none"   -> nothing searchable (e.g. an attachment-only message)
+//   - "static" -> search is disabled or failed: an honest fallback message,
+//                 never a silent answer from stale internal knowledge
+//   - "search" -> results (or an explicit "no results" note) + sources for AI
+//
+// `history` is the conversation so far (including the triggering message),
+// so a short follow-up is searched with its subject resolved from context.
+//
+// Exported for local verification scripts (no request/response involved).
+export const runWebSearchStage = async (content, history = []) => {
+  let plan;
   try {
-    const result = await webSearchService.searchWeb(content || '');
-    if (!result.enabled) {
-      console.warn('[WebSearch] WEB_SEARCH_ENABLED is not true; skipping live web search for this message.');
-      return { type: 'none' };
-    }
-    if (result.results.length === 0) {
-      return {
-        type: 'static',
-        content: webSearchService.SEARCH_NO_RESULTS_MESSAGE,
-        metadata: { webSearch: { used: true, sources: [] } },
-      };
-    }
-    return {
-      type: 'search',
-      sources: result.results,
-      contextText: webSearchService.buildSearchContext(result.results),
-      metadata: { webSearch: { used: true, sources: result.results } },
-    };
+    plan = await planSearch({ content, history });
   } catch (err) {
     console.error('[WebSearch] Failed:', err?.message || err);
     return {
       type: 'static',
       content: webSearchService.SEARCH_UNAVAILABLE_MESSAGE,
-      metadata: { webSearch: { used: true, sources: [] } },
+      metadata: { webSearch: { used: true, query: '', sources: [], error: true } },
     };
   }
+
+  if (plan.status === 'no_query') return { type: 'none' };
+
+  if (plan.status === 'disabled') {
+    console.error('[WebSearch] WEB_SEARCH_ENABLED is not true — live web search is required but not configured.');
+    return {
+      type: 'static',
+      content: webSearchService.SEARCH_DISABLED_MESSAGE,
+      metadata: { webSearch: { used: false, query: plan.query, sources: [] } },
+    };
+  }
+
+  if (plan.status === 'failed') {
+    console.error('[WebSearch] Failed:', plan.error?.message || plan.error);
+    return {
+      type: 'static',
+      content: webSearchService.SEARCH_UNAVAILABLE_MESSAGE,
+      metadata: { webSearch: { used: true, query: plan.query, sources: [], error: true } },
+    };
+  }
+
+  const sources = Array.isArray(plan.sources) ? plan.sources : [];
+  const images = Array.isArray(plan.images) ? plan.images : [];
+  return {
+    type: 'search',
+    sources,
+    images,
+    // Zero relevant results are NOT a failure: the AI is told the search came
+    // back empty so it can say so honestly instead of inventing an answer.
+    contextText: sources.length > 0
+      ? webSearchService.buildSearchContext(sources, images)
+      : webSearchService.NO_RESULTS_CONTEXT,
+    metadata: {
+      webSearch: {
+        used: true,
+        query: plan.query,
+        sources,
+        ...(images.length > 0 ? { images } : {}),
+        ...(plan.refined ? { refined: true } : {}),
+      },
+    },
+  };
 };
 
 const buildDocuments = (messages) => {
@@ -457,9 +463,15 @@ export const sendMessage = async (req, res, next) => {
       return success(res, await withSignedUrls({ chat, userMessage, action: actionRequest }));
     }
 
-    const webStage = await runWebSearchStage(content || '', req.user);
+    // Images are interpreted by the vision model from the rendered attachment;
+    // broadcasting pixel content into a web search is meaningless and lets the
+    // answer grounder rewrite vision output into search disclaimers. Skip the
+    // web-search stage entirely when this message carries an image.
+    const webStage = hydratedAttachments.some(a => a.type === 'image')
+      ? null
+      : await runWebSearchStage(content || '', history);
 
-    if (webStage.type === 'static') {
+    if (webStage && webStage.type === 'static') {
       const assistantMessage = await Message.create({
         conversation: chat._id,
         role: 'assistant',
@@ -479,8 +491,8 @@ export const sendMessage = async (req, res, next) => {
       attachments: hydratedAttachments,
       userContent: content,
       documents,
-      webSearch: webStage.type === 'search'
-        ? { sources: webStage.sources, text: webStage.contextText }
+      webSearch: webStage && webStage.type === 'search'
+        ? { sources: webStage.sources, images: webStage.images || [], text: webStage.contextText }
         : null,
     });
 
@@ -490,7 +502,7 @@ export const sendMessage = async (req, res, next) => {
       content: aiResponse.content,
       metadata: {
         ...(aiResponse.metadata || {}),
-        ...(webStage.type === 'search' ? webStage.metadata : {}),
+        ...(webStage && webStage.type === 'search' ? webStage.metadata : {}),
         ...(isDeveloperQuery(content || '') ? { developerProfile: true } : {}),
       },
     });
@@ -622,9 +634,11 @@ export const streamMessage = async (req, res, next) => {
       return;
     }
 
-    const webStage = await runWebSearchStage(triggerContent || '', req.user);
+    const webStage = triggerAttachments.some(a => a.type === 'image')
+      ? null
+      : await runWebSearchStage(triggerContent || '', history);
 
-    if (webStage.type === 'static') {
+    if (webStage && webStage.type === 'static') {
       res.write(`data: ${JSON.stringify({ content: webStage.content })}\n\n`);
       try {
         await Message.create({
@@ -644,11 +658,12 @@ export const streamMessage = async (req, res, next) => {
       return;
     }
 
-    if (webStage.type === 'search') {
+    if (webStage && webStage.type === 'search') {
       res.write(`data: ${JSON.stringify({ type: 'sources', sources: webStage.sources })}\n\n`);
     }
 
     let fullContent = '';
+    let resource = null;
 
     try {
       const stream = await processMessage({
@@ -659,14 +674,24 @@ export const streamMessage = async (req, res, next) => {
         userContent: triggerContent,
         documents,
         stream: true,
-        webSearch: webStage.type === 'search'
-          ? { sources: webStage.sources, text: webStage.contextText }
+        webSearch: webStage && webStage.type === 'search'
+          ? { sources: webStage.sources, images: webStage.images || [], text: webStage.contextText }
           : null,
       });
 
       for await (const chunk of stream) {
         fullContent += chunk;
         res.write(`data: ${JSON.stringify({ content: chunk })}\n\n`);
+      }
+
+      // The resource card is validated and resolved once the stream ends.
+      try {
+        resource = stream && stream.resource ? await stream.resource : null;
+      } catch (err) {
+        console.warn('[Stream] resource resolution failed:', err?.message || err);
+      }
+      if (resource) {
+        res.write(`data: ${JSON.stringify({ type: 'resource', resource })}\n\n`);
       }
     } catch (streamError) {
       console.error('[Stream Error] conversation=' + chat._id + ' mode=' + chat.mode + ' error:', streamError.message || streamError);
@@ -684,7 +709,8 @@ export const streamMessage = async (req, res, next) => {
           content: fullContent,
           metadata: {
             ...(developerQuery ? { developerProfile: true } : {}),
-            ...(webStage.type === 'search' ? webStage.metadata : {}),
+            ...(webStage && webStage.type === 'search' ? webStage.metadata : {}),
+            ...(resource ? { resource } : {}),
           },
         });
       }

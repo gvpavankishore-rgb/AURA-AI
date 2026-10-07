@@ -181,6 +181,31 @@ const extractToken = (req) => {
   return header && header.startsWith('Bearer ') ? header.slice(7) : null;
 };
 
+// Re-establish the request-scoped Supabase context from the caller's bearer
+// token.
+//
+// WHY THIS EXISTS: `authenticate` / `optionalAuth` run `requestStore.run(...)`
+// and call next() synchronously, which keeps the store for controllers that run
+// before any further request-body I/O (e.g. JSON endpoints, whose body is parsed
+// BEFORE auth). Multipart parsers (multer) are different: they read the body
+// DURING the route, and for any body large enough to span more than one socket
+// read the parser's completion callback is invoked from the socket's async
+// context — which no longer carries the AsyncLocalStorage store. The controller
+// then runs with an EMPTY store, so `config/supabase.js` falls back to the ANON
+// client, `auth.uid()` is NULL, and the owner-only Storage RLS rejects the write
+// ("new row violates row-level security policy"). That is exactly why a small
+// image uploaded fine but a real (multi-chunk) photo returned 503.
+//
+// Mounting this immediately AFTER the multer middleware and BEFORE the
+// controller restores the store for the controller and everything it awaits, so
+// the user's JWT is always used for Storage/DB operations regardless of body
+// size. No-op when there is no bearer token.
+export const withRequestContext = (req, res, next) => {
+  const token = extractToken(req);
+  if (!token) return next();
+  return requestStore.run({ token }, next);
+};
+
 const describeToken = (token) => (token ? `present (${token.length} chars)` : 'MISSING');
 
 const authErrorResponse = (res, token, verifyError) => {

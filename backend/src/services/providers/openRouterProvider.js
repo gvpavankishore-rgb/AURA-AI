@@ -176,10 +176,11 @@ const postForm = async ({ urlPath, form, timeoutMs = 120000 }) => {
   return handleResponse({ urlPath, res });
 };
 
-export const chatCompletions = async ({ model, messages, stream, max_tokens = 4096 }) => {
+export const chatCompletions = async ({ model, messages, stream, max_tokens = 4096, timeoutMs }) => {
   const res = await postJson({
     urlPath: 'chat/completions',
     body: { model, messages, max_tokens, stream },
+    ...(timeoutMs ? { timeoutMs } : {}),
   });
   return res;
 };

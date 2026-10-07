@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import env from '../config/env.js';
-import { getSupabase, getAnonClient, isSupabaseConfigured } from '../config/supabase.js';
+import { getSupabase, getAnonClient, isSupabaseConfigured, requestStore } from '../config/supabase.js';
 import { AppError } from '../middleware/errorHandler.js';
 
 // =============================================================================
@@ -183,6 +183,15 @@ export const uploadBuffer = async ({ authUid, buffer, contentType = 'application
   if (!buffer || !Buffer.isBuffer(buffer) || buffer.length === 0) {
     throw new AppError('No upload data provided', 400);
   }
+  // Refuse to write without the caller's JWT in scope. If the request-scoped
+  // store were ever missing (e.g. a multipart parser callback escaping the
+  // AsyncLocalStorage context), getSupabase() would silently downgrade to the
+  // ANON client and Storage RLS would reject the insert with a confusing 503.
+  // Failing fast with a session error keeps that misconfiguration diagnosable.
+  if (!requestStore.getStore()?.token) {
+    console.error('[Storage][upload] no request-scoped user token; refusing anon write of', objectKey({ authUid, filename, ext: ext || filename?.split('.')?.pop?.() || '' }));
+    throw new AppError('Your session has expired. Please sign in again.', 401);
+  }
   const key = objectKey({ authUid, filename, ext: ext || filename?.split('.')?.pop?.() || '' });
 
   const { error } = await getRequestClient().storage.from(BUCKET).upload(key, buffer, {
@@ -191,7 +200,16 @@ export const uploadBuffer = async ({ authUid, buffer, contentType = 'application
     upsert: false,
   });
   if (error) {
-    console.error('[Storage][upload] could not save attachment:', error?.message || error);
+    // Log the storage key (never a secret) and whether the user's JWT was in
+    // scope, so an owner-RLS rejection can be told apart from a genuine
+    // bucket/policy problem next time.
+    console.error('[Storage][upload] could not save attachment:', {
+      key,
+      hasUserToken: Boolean(requestStore.getStore()?.token),
+      message: error?.message || String(error),
+      code: error?.code,
+      statusCode: error?.statusCode,
+    });
     throw toStorageAppError(error, 'Could not store the uploaded file');
   }
   const url = await getSignedUrl(key).catch(() => '');

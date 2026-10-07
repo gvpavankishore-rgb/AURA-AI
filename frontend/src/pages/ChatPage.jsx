@@ -350,6 +350,17 @@ export default function ChatPage() {
             return updated;
           });
         },
+        onResource: (resource) => {
+          if (generationRef.current !== gen) return;
+          if (!resource) return;
+          setMessages(prev => {
+            const updated = [...prev];
+            const lastIdx = updated.length - 1;
+            if (lastIdx < 0) return updated;
+            updated[lastIdx] = { ...updated[lastIdx], resource };
+            return updated;
+          });
+        },
         onChunk: (chunk) => {
           if (generationRef.current !== gen) return;
           if (abortRef.current) return;

@@ -365,7 +365,7 @@ class ApiService {
   async sendMessage(data) { return this.request('/chat/message', { method: 'POST', body: data, retries: 0 }); }
 
   async streamMessage(payload, {
-    onMeta, onDeveloper, onAction, onSources, onChunk, onDone, onError, onAbort, signal,
+    onMeta, onDeveloper, onAction, onSources, onResource, onChunk, onDone, onError, onAbort, signal,
   } = {}) {
     // Internal watchdog keeps the call from hanging forever without
     // interfering with the caller's own abort (Stop generation) signal.
@@ -478,6 +478,7 @@ class ApiService {
               if (parsed.type === 'developer_profile') { onDeveloper?.(parsed); }
               else if (parsed.type === 'action_confirmation') { onAction?.(parsed); }
               else if (parsed.type === 'sources') { onSources?.(Array.isArray(parsed.sources) ? parsed.sources : []); }
+              else if (parsed.type === 'resource') { onResource?.(parsed.resource || null); }
               else if (parsed.chatId) { onMeta?.(parsed); }
               else if (parsed.content) { onChunk?.(parsed.content); }
             } catch {}

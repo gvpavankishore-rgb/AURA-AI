@@ -3,6 +3,7 @@ import { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback, mem
 import ChatAvatar from './ChatAvatar';
 import ActionPermissionCard from './ActionPermissionCard';
 import DeveloperProfileCard from './DeveloperProfileCard';
+import ResourceCard from './ResourceCard';
 import { useAuth } from '../context/AuthContext';
 import { attachmentUrl, isImageAttachment, isSignedUrlStale, isStorageKey } from '../services/api';
 import useAutoScroll from '../hooks/useAutoScroll';
@@ -47,6 +48,14 @@ const sourcesForMessage = (msg) => {
   if (Array.isArray(meta.sources)) return meta.sources;
   if (Array.isArray(meta.webSearch?.sources)) return meta.webSearch.sources;
   return [];
+};
+
+// The server-validated resource card travels either as a live stream field
+// (`msg.resource`) or inside persisted metadata (`msg.metadata.resource`).
+const resourceForMessage = (msg) => {
+  if (msg.role !== 'assistant') return null;
+  const resource = msg.resource || msg.metadata?.resource;
+  return resource && resource.primaryLink && resource.title ? resource : null;
 };
 
 // ---------------------------------------------------------------------------
@@ -163,6 +172,7 @@ function MessageBody({ msg, isLast, streaming, onImageClick, onRefreshPaths }) {
   const images = attachmentsArr.filter(a => isImageAttachment(a));
   const others = attachmentsArr.filter(a => !isImageAttachment(a));
   const sources = sourcesForMessage(msg);
+  const resource = resourceForMessage(msg);
   const revealContent = !!(
     msg.role === 'assistant' &&
     msg.content &&
@@ -205,6 +215,7 @@ function MessageBody({ msg, isLast, streaming, onImageClick, onRefreshPaths }) {
       <Suspense fallback={<div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>}>
         <MarkdownContent content={msg.content} />
       </Suspense>
+      {resource && <ResourceCard resource={resource} />}
       {sources.length > 0 && (
         <div className="sources-section">
           <div className="sources-title">Sources</div>
@@ -348,6 +359,7 @@ function estimateRowHeight(msg) {
   if (atts.some(a => !isImageAttachment(a))) h += 30;
   const sources = sourcesForMessage(msg);
   if (sources.length > 0) h += 28 + sources.length * 22;
+  if (resourceForMessage(msg)) h += 260;
   if (msg.developerProfile || msg.metadata?.developerProfile) h += 90;
   return Math.min(1600, Math.max(64, h));
 }

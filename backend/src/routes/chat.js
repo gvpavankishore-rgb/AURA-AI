@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { getChats, createChat, getChat, updateChat, deleteChat, sendMessage, streamMessage, deleteAllChats, uploadChatFile, refreshAttachmentUrls } from '../controllers/chatController.js';
-import { authenticate, optionalAuth } from '../middleware/auth.js';
+import { authenticate, optionalAuth, withRequestContext } from '../middleware/auth.js';
 import { uploadAny } from '../middleware/upload.js';
 import { aiLimiter, payloadLimiter } from '../middleware/rateLimiters.js';
 
@@ -21,6 +21,10 @@ router.delete('/:id', authenticate, deleteChat);
 
 router.post('/message', optionalAuth, aiLimiter, sendMessage);
 router.post('/stream', optionalAuth, aiLimiter, streamMessage);
-router.post('/upload', authenticate, payloadLimiter, uploadAny.single('file'), uploadChatFile);
+// `withRequestContext` MUST sit between the multipart parser and the controller:
+// multer's stream callbacks run outside the request's AsyncLocalStorage store,
+// which would otherwise make the Storage upload use the anon client and be
+// rejected by the owner-only RLS. See middleware/auth.js.
+router.post('/upload', authenticate, payloadLimiter, uploadAny.single('file'), withRequestContext, uploadChatFile);
 
 export default router;
