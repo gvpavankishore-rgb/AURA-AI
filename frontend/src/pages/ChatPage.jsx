@@ -26,7 +26,7 @@ export default function ChatPage() {
   const { chatId } = useParams();
   const navigate = useNavigate();
   const { onMenuClick } = useOutletContext();
-  const { user } = useAuth();
+  const { user, loading: authLoading } = useAuth();
   const [messages, setMessages] = useState([]);
   const [chat, setChat] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -675,6 +675,9 @@ export default function ChatPage() {
   const lastMessage = messages[messages.length - 1];
   const showRetry = lastMessage?.isError && !loading && !streaming;
   const showRegenerate = !loading && !streaming && messages.length > 0 && !lastMessage?.isError && lastMessage?.role === 'assistant';
+  // Prompt/suggestion cards are a pre-auth landing affordance only. Gate on
+  // authLoading too so a session being restored never flashes them first.
+  const showSuggestions = !authLoading && !user;
 
   return (
     <>
@@ -710,14 +713,16 @@ export default function ChatPage() {
             </div>
             <h2>How can I help you today?</h2>
             <p>AURA can handle writing, analysis, coding, images, documents, translation, and more.</p>
-            <div className="suggestion-grid">
-              {suggestions.map((s, i) => (
-                <button key={i} className="suggestion-card" onClick={() => handleSuggestion(s.text)}>
-                  <span style={{ marginRight: 6 }}>{s.icon}</span>
-                  {s.text}
-                </button>
-              ))}
-            </div>
+            {showSuggestions && (
+              <div className="suggestion-grid">
+                {suggestions.map((s, i) => (
+                  <button key={i} className="suggestion-card" onClick={() => handleSuggestion(s.text)}>
+                    <span style={{ marginRight: 6 }}>{s.icon}</span>
+                    {s.text}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         )
       ) : (

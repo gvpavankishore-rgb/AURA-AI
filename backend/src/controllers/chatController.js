@@ -12,6 +12,7 @@ import { isDeveloperQuery } from '../services/developerInfo.js';
 import { isCodingRequest } from '../services/intentDetector.js';
 import * as webSearchService from '../services/webSearchService.js';
 import { planSearch } from '../services/searchPlanner.js';
+import { isConversationalMessage } from '../services/conversationIntent.js';
 
 const MAX_DOC_CONTEXT = 24000;
 const CHAT_PAGE_DEFAULT_LIMIT = 50;
@@ -22,13 +23,20 @@ const CHAT_MODES = ['chat', 'coding', 'voice', 'documents', 'translate'];
 // Universal web-search stage. EVERY non-empty user question goes through the
 // live web first: there is deliberately NO topic/keyword classifier, no
 // whitelist and no "should we search?" decision based on the question's
-// content. The same code path handles a question the developer has never seen.
+// content. The same code path handles a question the developer has never
+// seen. The ONE exception is a purely social/ritual message (a greeting,
+// thanks, a farewell, an emoji ping): it carries nothing to look up, so
+// services/conversationIntent.js lets it skip the stage instead of running a
+// meaningless query that would drag in sources, citations and a resource
+// card. Every message containing a content word still takes the universal
+// search path below.
 //
 // The reusable planning (conversation-aware query -> search -> relevance
 // check -> optional refined search) lives in services/searchPlanner.js;
 // this function only maps its outcome onto the three stage types:
 //
-//   - "none"   -> nothing searchable (e.g. an attachment-only message)
+//   - "none"   -> nothing searchable (e.g. an attachment-only message or a
+//                 purely social message)
 //   - "static" -> search is disabled or failed: an honest fallback message,
 //                 never a silent answer from stale internal knowledge
 //   - "search" -> results (or an explicit "no results" note) + sources for AI
@@ -38,6 +46,10 @@ const CHAT_MODES = ['chat', 'coding', 'voice', 'documents', 'translate'];
 //
 // Exported for local verification scripts (no request/response involved).
 export const runWebSearchStage = async (content, history = []) => {
+  // Social/ritual messages never reach the planner: no query is built from
+  // them, so a "hi" can never produce sources, citations or a video card.
+  if (isConversationalMessage(content)) return { type: 'none' };
+
   let plan;
   try {
     plan = await planSearch({ content, history });
