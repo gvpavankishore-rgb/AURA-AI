@@ -249,7 +249,7 @@ const sanitizeStream = (rawStream, allowedUrls = null) => {
   })();
 };
 
-export const processMessage = async ({ messages, memories = [], mode = 'chat', attachments, userContent, stream = false, documents = [], webSearch = null }) => {
+export const processMessage = async ({ messages, memories = [], mode = 'chat', attachments, userContent, stream = false, documents = [], webSearch = null, conversational: conversationalFlag = null }) => {
   const content = String(userContent || '').trim();
   const vision = hasImageAttachments(attachments) || isVisionHint(content);
   const coding = mode === 'coding' || isCodingRequest(content);
@@ -273,12 +273,14 @@ export const processMessage = async ({ messages, memories = [], mode = 'chat', a
   // Brief conversational register for purely social messages. Only applies
   // when no search ran (the stage returns "none" for them), no image is
   // attached and the message is not a translate payload - so streaming and
-  // non-streaming take exactly the same decision.
-  const conversational = !webSearch
+  // non-streaming take exactly the same decision. The web-search stage may
+  // also flag a message it classified as conversational (small talk the
+  // deterministic fast path missed); that explicit flag is honoured too.
+  const conversational = conversationalFlag === true || (!webSearch
     && !vision
     && (attachments || []).length === 0
     && mode !== 'translate'
-    && isConversationalMessage(content);
+    && isConversationalMessage(content));
 
   const requestModel = vision ? env.aiVisionModel : env.aiModel;
   const maxTokens = (vision || coding) ? 8192 : 4096;

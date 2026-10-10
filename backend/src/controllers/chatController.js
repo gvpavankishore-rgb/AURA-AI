@@ -37,22 +37,23 @@ const CHAT_MODES = ['chat', 'coding', 'voice', 'documents', 'translate'];
 //
 //   - "none"   -> nothing searchable (e.g. an attachment-only message or a
 //                 purely social message)
-//   - "static" -> search is disabled or failed: an honest fallback message,
-//                 never a silent answer from stale internal knowledge
+//   - "static" -> search is disabled or failed (an honest fallback message,
+//                 never a silent answer from stale internal knowledge), or the
+//                 intent is genuinely ambiguous and needs a short clarification
 //   - "search" -> results (or an explicit "no results" note) + sources for AI
 //
 // `history` is the conversation so far (including the triggering message),
 // so a short follow-up is searched with its subject resolved from context.
 //
 // Exported for local verification scripts (no request/response involved).
-export const runWebSearchStage = async (content, history = []) => {
+export const runWebSearchStage = async (content, history = [], planner = planSearch) => {
   // Social/ritual messages never reach the planner: no query is built from
   // them, so a "hi" can never produce sources, citations or a video card.
-  if (isConversationalMessage(content)) return { type: 'none' };
+  if (isConversationalMessage(content)) return { type: 'none', conversational: true };
 
   let plan;
   try {
-    plan = await planSearch({ content, history });
+    plan = await planner({ content, history });
   } catch (err) {
     console.error('[WebSearch] Failed:', err?.message || err);
     return {
@@ -63,6 +64,23 @@ export const runWebSearchStage = async (content, history = []) => {
   }
 
   if (plan.status === 'no_query') return { type: 'none' };
+
+  // The resolver judged the message purely conversational (small talk the
+  // deterministic fast path did not catch, in any language / with typos).
+  // Like a greeting, it skips the web stage entirely - no query, sources,
+  // citations or resource card - and gets a brief conversational reply.
+  if (plan.status === 'chat') return { type: 'none', conversational: true };
+
+  // The intent resolver decided the message has genuinely ambiguous meanings.
+  // Ask the short clarification instead of guessing (and never search the
+  // literal misspelling). The user's original message stays in the history.
+  if (plan.status === 'clarify') {
+    return {
+      type: 'static',
+      content: plan.clarification,
+      metadata: {},
+    };
+  }
 
   if (plan.status === 'disabled') {
     console.error('[WebSearch] WEB_SEARCH_ENABLED is not true — live web search is required but not configured.');
@@ -506,6 +524,7 @@ export const sendMessage = async (req, res, next) => {
       webSearch: webStage && webStage.type === 'search'
         ? { sources: webStage.sources, images: webStage.images || [], text: webStage.contextText }
         : null,
+      conversational: Boolean(webStage && webStage.conversational),
     });
 
     const assistantMessage = await Message.create({
@@ -689,6 +708,7 @@ export const streamMessage = async (req, res, next) => {
         webSearch: webStage && webStage.type === 'search'
           ? { sources: webStage.sources, images: webStage.images || [], text: webStage.contextText }
           : null,
+        conversational: Boolean(webStage && webStage.conversational),
       });
 
       for await (const chunk of stream) {

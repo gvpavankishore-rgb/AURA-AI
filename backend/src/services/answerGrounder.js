@@ -22,17 +22,15 @@
 
 import env from '../config/env.js';
 import * as openRouter from './providers/openRouterProvider.js';
-import { buildUrlAllowlist, sanitizeLinks } from './webSearchService.js';
+import { buildUrlAllowlist, normalizeUrlKey, sanitizeLinks } from './webSearchService.js';
 
 const VERIFY_TIMEOUT_MS = 30000;
-// Blocks longer than this are split so one huge paragraph still gets checked.
-const SPLIT_CHARS = 2500;
 
 const VERIFY_SYSTEM = `You are a strict fact checker for a web-searched answer.
 
-You receive three things: a user's question, the NUMBERED web search results that were retrieved for it (this is the only evidence that exists), and a draft segment of the answer.
+You receive three things: a user's question, the NUMBERED web search results that were retrieved for it (this is the only evidence that exists), and a draft answer.
 
-Go claim by claim. For every factual claim, ask: does the evidence actually state this? Keep what it states and delete everything else, then return the segment.
+Go claim by claim. For every factual claim, ask: does the evidence actually state this? Keep what it states and delete everything else, then return the answer.
 
 Rules:
 - DELETION IS THE DEFAULT. Delete an unsupported sentence completely. Never leave an unsupported claim in the text and merely append a disclaimer to it.
@@ -42,6 +40,7 @@ Rules:
 - Never add a fact, number, date, name, entity, feature, statistic, report, benchmark, regulation, example, URL or citation that is not in the evidence. Never complete missing information from your own knowledge, and never make an answer look more complete than the evidence allows.
 - A source mentioning an entity does NOT support other properties of that entity. Only what a source actually states is supported.
 - Citations are structure, not claims: never remove, move or renumber a marker [n] that is attached to a supported claim, and never keep a marker the evidence does not back.
+- Links are structure too: never delete or rewrite a URL that appears in the evidence results - keep it wherever the draft used it, even when you delete an unsupported claim sitting next to it. Delete only URLs that are not in the evidence.
 - Keep everything the evidence does support exactly as written: same language, tone, structure, order, headings, lists, tables, links, formatting and length. Do not shorten supported content.
 - For "latest / current / today / now" claims: support comes only from the evidence; if the evidence does not cover the requested time, say the search results do not confirm it.
 - If the evidence's sources disagree, keep both claims with their attribution instead of silently choosing one.
@@ -51,8 +50,9 @@ Rules:
 - Delete sentences that talk about knowledge cutoffs, not having real-time access, or training data.
 - Never modify anything inside a code block; return code blocks byte-identical.
 - Keep a citation like [2] only if source 2 exists in the evidence; never invent new citation numbers.
-- If the segment contains nothing unsupported, return it unchanged.
-- Return ONLY the segment text: no explanations, no preamble, no surrounding code fences.`;
+- If the answer contains nothing unsupported, return it unchanged.
+- Never add notes about your own checking process (for example "the segment only contained...", "as supported by the evidence", "all evidence sources confirm") and never restate content that already appears elsewhere in the answer.
+- Return ONLY the answer text: no explanations, no preamble, no surrounding code fences.`;
 
 // ---------------------------------------------------------------------------
 // No-evidence check.
@@ -66,7 +66,7 @@ Rules:
 // ---------------------------------------------------------------------------
 const VERIFY_SYSTEM_NO_EVIDENCE = `You are a strict fact checker. A web search was performed for this answer but returned NO usable results, so there is NO web evidence available.
 
-You receive the user's question and a draft segment of the answer.
+You receive the user's question and a draft answer.
 
 Keep only what is safe to say without web evidence, and remove anything that would be an unverifiable current or external claim.
 
@@ -85,8 +85,9 @@ Rules:
 - Never invent a fact, number, date, name, source, URL or citation.
 - Do not repeat an unsupported specific detail when explaining it away; refer to it generically.
 - Do NOT add a search-failure disclaimer merely because the search was empty. Only when the user's question genuinely requires current or external information does the draft answer with unverifiable specifics: in that case delete those specifics and replace them with ONE short sentence saying the available search results do not confirm it.
-- If the segment is fully answerable from the assistant's own context or from stable knowledge, return it unchanged.
-- Return ONLY the segment text: no explanations, no preamble, no surrounding code fences.`;
+- If the answer is fully answerable from the assistant's own context or from stable knowledge, return it unchanged.
+- Never add notes about your own checking process and never restate content that already appears elsewhere in the answer.
+- Return ONLY the answer text: no explanations, no preamble, no surrounding code fences.`;
 
 const normalizeEvidence = (evidence) => String(evidence || '').trim();
 
@@ -108,6 +109,7 @@ const askChecker = async ({ question, evidence, segment, noEvidence = false }) =
       ],
       stream: false,
       max_tokens: 4096,
+      temperature: 0,
       timeoutMs: VERIFY_TIMEOUT_MS,
     });
     const raw = await res.text().catch(() => '');
@@ -147,6 +149,41 @@ const buildGuards = (sources) => {
   return { allowedUrls: buildUrlAllowlist(list), sourceCount: list.length };
 };
 
+// Evidence URLs (from the search results) that literally appear in a piece of
+// text, de-duplicated and in order of first appearance. Used to make sure the
+// checker can never silently drop a link the draft had already cited.
+const EVIDENCE_URL_RE = /https?:\/\/[^\s<>"'`)\]]+/g;
+const evidenceUrlsIn = (text, allowedUrls) => {
+  if (!(allowedUrls instanceof Set)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const raw of String(text || '').match(EVIDENCE_URL_RE) || []) {
+    const clean = raw.replace(/[)\].,;:!?'"]+$/, '');
+    const key = normalizeUrlKey(clean);
+    if (key && allowedUrls.has(key) && !seen.has(key)) {
+      seen.add(key);
+      out.push(clean);
+    }
+  }
+  return out;
+};
+
+// Re-attach evidence links the checker removed, so a source the draft cited can
+// never disappear from the answer. Links are structure, not claims: they are
+// restored as the source's own title link (or bare URL) and never fabricated.
+const restoreEvidenceLinks = (text, urls, sources) => {
+  if (!urls.length) return text;
+  const list = Array.isArray(sources) ? sources : [];
+  const links = urls.map((url) => {
+    const key = normalizeUrlKey(url);
+    const match = list.find((s) => normalizeUrlKey(s?.url) === key);
+    const title = match?.title ? String(match.title).replace(/[\[\]\r\n]+/g, ' ').trim() : '';
+    return title ? `[${title}](${url})` : url;
+  });
+  const body = String(text || '').trimEnd();
+  return `${body}${body ? '\n\n' : ''}Sources: ${links.join(' · ')}`;
+};
+
 // --------------------------------------------------------------------------
 // Non-streaming path: check the whole draft once.
 // `checker` is injectable so verification scripts can drive the pipeline
@@ -167,101 +204,73 @@ export const groundAnswer = async ({ question = '', evidence = '', sources = [],
 
   const verify = typeof checker === 'function' ? checker : askChecker;
   const checked = await verify({ question, evidence: normalizeEvidence(evidence), segment: prepared, noEvidence });
-  if (!checked) return prepared;
-  return sanitizeGroundedText(checked, guards);
+  const final = checked ? sanitizeGroundedText(checked, guards) : prepared;
+
+  // Guarantee link integrity: any evidence URL the draft already cited must
+  // still be present after grounding. Prompt rules alone are not reliable, so
+  // this is enforced structurally.
+  const before = evidenceUrlsIn(prepared, guards.allowedUrls);
+  if (!before.length) return final;
+  const afterKeys = new Set(evidenceUrlsIn(final, guards.allowedUrls).map(normalizeUrlKey));
+  const missing = before.filter((url) => !afterKeys.has(normalizeUrlKey(url)));
+  return missing.length ? restoreEvidenceLinks(final, missing, sources) : final;
 };
 
 // --------------------------------------------------------------------------
-// Streaming path: split the raw draft into blocks (never splitting inside a
-// fenced code block), check them in order while the rest is still being
-// generated, and emit only checked, sanitized text. Same rules as above.
+// Streaming path.
+//
+// The COMPLETE draft is grounded ONCE - through the exact same groundAnswer()
+// used by the non-streaming path - before a single character is emitted. This
+// is what keeps the streamed and non-streamed answers equivalent.
+//
+// It also fixes the previous integration bug: the old version called the
+// evidence checker once PER PARAGRAPH, so every call rewrote/expanded its own
+// paragraph from the full evidence. The segments then stacked up into a
+// duplicated answer ("Paris is the capital..." repeated), with the checker's
+// own notes (for example "...as supported by all evidence sources provided")
+// leaking into the user-visible text. Grounding the whole draft in one pass
+// makes that impossible: the checker edits one complete answer instead of
+// regenerating each fragment.
+//
+// When no search ran there is no evidence to ground against, so the raw stream
+// is still passed through untouched (token-by-token, unchanged).
 // --------------------------------------------------------------------------
-const takeSegment = (buf, forceSplit = true) => {
-  let inFence = false;
-  let i = 0;
-  while (i < buf.length) {
-    if ((i === 0 || buf[i - 1] === '\n') && buf.startsWith('```', i)) {
-      inFence = !inFence;
-      i += 3;
-      continue;
-    }
-    if (!inFence && buf.startsWith('\n\n', i)) return { end: i + 2, rest: buf.slice(i + 2) };
-    i += 1;
-  }
-  if (forceSplit && !inFence && buf.length >= SPLIT_CHARS) {
-    const cut = Math.max(buf.lastIndexOf('\n'), buf.lastIndexOf(' '));
-    if (cut > SPLIT_CHARS / 2) return { end: cut + 1, rest: buf.slice(cut + 1) };
-    return { end: SPLIT_CHARS, rest: buf.slice(SPLIT_CHARS) };
-  }
-  return { end: -1, rest: buf };
-};
+const HEARTBEAT_MS = 15000;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export const createGroundedStream = ({ question = '', evidence = '', sources = [], checker = null }, rawStream) => {
   const evidenceText = normalizeEvidence(evidence);
   // No evidence (no search ran): pass the raw stream through untouched.
   if (!evidenceText) return rawStream;
-  const guards = buildGuards(sources);
-  const noEvidence = !Array.isArray(sources) || sources.length === 0;
-  const verify = typeof checker === 'function' ? checker : askChecker;
 
   return (async function* () {
-    const queue = [];
-    let signal = null;
-    let pumpDone = false;
-    let pumpError = null;
-
-    const wake = () => {
-      if (signal) {
-        const release = signal;
-        signal = null;
-        release();
-      }
-    };
-
-    // Producer: reads the raw model stream and cuts it into blocks without
-    // waiting for the checks, so generation is not slowed down.
-    const pump = (async () => {
-      let buf = '';
-      try {
-        for await (const chunk of rawStream) {
-          if (typeof chunk !== 'string' || !chunk) continue;
-          buf += chunk;
-          let seg = takeSegment(buf);
-          while (seg.end !== -1) {
-            if (seg.end > 0) queue.push(buf.slice(0, seg.end));
-            buf = seg.rest;
-            seg = takeSegment(buf);
-          }
-        }
-        if (buf) queue.push(buf);
-      } catch (err) {
-        pumpError = err;
-      } finally {
-        pumpDone = true;
-        wake();
-      }
-    })();
-
-    try {
-      while (true) {
-        if (queue.length === 0) {
-          if (pumpDone) break;
-          await new Promise((resolve) => { signal = resolve; });
-          continue;
-        }
-        const segment = queue.shift();
-        if (!String(segment).trim()) continue;
-
-        let output = segment;
-        const checked = await verify({ question, evidence: evidenceText, segment, noEvidence });
-        if (checked) output = checked;
-        const safe = sanitizeGroundedText(output, guards);
-        if (safe) yield safe;
-      }
-      if (pumpError) throw pumpError;
-    } finally {
-      wake();
-      await pump.catch(() => {});
+    // The complete draft is buffered before anything is shown, so while the
+    // model generates and the checker runs the client would otherwise see no
+    // bytes from the moment the sources event arrived. Emit an empty heartbeat
+    // every HEARTBEAT_MS: the client ignores empty content but it resets its
+    // stall watchdog, so a long answer is never aborted mid-grounding.
+    let draft = '';
+    let last = Date.now();
+    for await (const chunk of rawStream) {
+      draft += String(chunk ?? '');
+      if (Date.now() - last >= HEARTBEAT_MS) { last = Date.now(); yield ''; }
     }
+
+    // Ground the whole draft in one pass, still heartbeating while it runs.
+    let grounded;
+    let settled = false;
+    const job = groundAnswer({ question, evidence: evidenceText, sources, text: draft, checker })
+      .then((value) => { grounded = value; settled = true; })
+      .catch((err) => { settled = true; throw err; });
+    job.catch(() => {});
+    while (!settled) {
+      const winner = await Promise.race([
+        job.then(() => 'done', () => 'done'),
+        sleep(HEARTBEAT_MS).then(() => 'tick'),
+      ]);
+      if (winner === 'tick') yield '';
+    }
+    await job;
+    if (grounded) yield grounded;
   })();
 };

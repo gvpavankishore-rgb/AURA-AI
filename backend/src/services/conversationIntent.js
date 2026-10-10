@@ -109,4 +109,38 @@ export const isConversationalMessage = (text) => {
   return segments.every(isSocialSegment);
 };
 
+// Words that frame a question (interrogatives, auxiliaries, determiners and
+// prepositions) without naming the subject it is about. They let us measure
+// how much real content a question carries.
+const FRAMING_WORDS = new Set([
+  'what', 'whats', 'who', 'whom', 'whose', 'which', 'when', 'where', 'why', 'how',
+  'is', 'are', 'was', 'were', 'am', 'be', 'been', 'being',
+  'do', 'does', 'did', 'can', 'could', 'will', 'would', 'should', 'shall', 'may', 'might', 'must',
+  'the', 'of', 'in', 'on', 'at', 'to', 'for', 'from', 'by', 'with', 'about', 'into', 'over',
+  'and', 'or', 'but', 'if', 'then', 'than', 'that', 'this', 'these', 'those',
+]);
+
+// True when a message carries an unmistakable information request that small
+// talk cannot reasonably explain: it contains a URL, or it is a question that
+// names at least two content words (the subject it is asking about).
+//
+// This is a deterministic safety net for the model layer: a casually phrased
+// but genuinely factual question ("Hey, what are the latest AI tools?") must
+// keep its search even if a classifier mistakes the greeting for small talk.
+export const isConfidentInformation = (text) => {
+  const raw = String(text ?? '').trim();
+  if (!raw) return false;
+  if (/https?:\/\//i.test(raw)) return true;
+  if (!/[?？]\s*$/.test(raw)) return false;
+
+  const words = normalize(raw)
+    .split(' ')
+    .map((w) => w.replace(/[^\p{L}\p{N}']/gu, ''))
+    .filter(Boolean);
+  const content = words.filter(
+    (w) => w.length >= 3 && !SOCIAL_WORDS.has(w) && !FRAMING_WORDS.has(w)
+  );
+  return content.length >= 2;
+};
+
 export default isConversationalMessage;
